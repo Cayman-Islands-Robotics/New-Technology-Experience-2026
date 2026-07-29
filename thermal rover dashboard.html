@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SCOUT-01 · Field Dashboard</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg-void:#14140f;
+    --bg-panel:#1d1c15;
+    --bg-panel-raised:#242219;
+    --line:#3a382c;
+    --text:#ece8dd;
+    --text-dim:#948f7d;
+    --ember:#c6491d;
+    --ember-glow:#e0693a;
+    --safe:#6b8f5a;
+    --amber:#d9a441;
+    --thermal:#4c8c8c;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg-void); color:var(--text);
+    font-family:'Inter',sans-serif;
+    height:100vh; overflow:hidden;
+    display:flex; flex-direction:column;
+  }
+  .ticker-bar{
+    background:var(--bg-panel-raised);
+    border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:16px;
+    padding:10px 20px; flex-shrink:0;
+  }
+  .brand{
+    font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:15px;
+    letter-spacing:0.04em; white-space:nowrap;
+  }
+  .brand span{color:var(--ember);}
+  .status-dot{
+    width:8px; height:8px; border-radius:50%; background:var(--safe);
+    box-shadow:0 0 6px var(--safe); flex-shrink:0;
+    animation:pulse 2s infinite;
+  }
+  .status-dot.demo{background:var(--amber); box-shadow:0 0 6px var(--amber);}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.4;}}
+  .status-label{font-size:12px; color:var(--text-dim); white-space:nowrap;}
+  .ticker-track{
+    flex:1; overflow:hidden; white-space:nowrap; position:relative;
+    font-family:'JetBrains Mono',monospace; font-size:13px;
+    mask-image:linear-gradient(90deg,transparent,#000 4%,#000 96%,transparent);
+  }
+  .ticker-content{display:inline-block; padding-left:100%; animation:scroll 22s linear infinite;}
+  @keyframes scroll{from{transform:translateX(0);}to{transform:translateX(-100%);}}
+  .ticker-content span{margin-right:36px; color:var(--text-dim);}
+  .ticker-content b{color:var(--text); font-weight:700;}
+  .ticker-content .hot{color:var(--ember-glow);}
+
+  .layout{flex:1; display:grid; grid-template-columns:1fr 380px; min-height:0;}
+  #map{width:100%; height:100%; background:var(--bg-panel);}
+
+  .sidebar{
+    background:var(--bg-panel); border-left:1px solid var(--line);
+    display:flex; flex-direction:column; min-height:0;
+  }
+  .panel{border-bottom:1px solid var(--line); padding:16px 18px; overflow:hidden;}
+  .panel.grow{flex:1; overflow-y:auto; min-height:0;}
+  .panel h2{
+    font-family:'Space Grotesk',sans-serif; font-size:12px; font-weight:700;
+    text-transform:uppercase; letter-spacing:0.08em; color:var(--text-dim);
+    margin:0 0 12px 0;
+  }
+  .stat-grid{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+  .stat{
+    background:var(--bg-panel-raised); border:1px solid var(--line); border-radius:6px;
+    padding:10px 12px;
+  }
+  .stat .label{font-size:11px; color:var(--text-dim); margin-bottom:4px;}
+  .stat .value{font-family:'JetBrains Mono',monospace; font-size:20px; font-weight:700;}
+  .stat .value.ember{color:var(--ember-glow);}
+  .stat .value.thermal{color:var(--thermal);}
+
+  canvas#chart{width:100%!important; height:120px!important; margin-top:12px;}
+
+  .log-item{
+    font-family:'JetBrains Mono',monospace; font-size:11.5px; color:var(--text-dim);
+    padding:6px 0; border-bottom:1px dashed var(--line);
+    display:flex; justify-content:space-between; gap:8px;
+  }
+  .log-item b{color:var(--text); font-weight:600;}
+  .log-item.alert b{color:var(--ember-glow);}
+
+  .marl-panel img{width:100%; border-radius:6px; border:1px solid var(--line); display:block; margin-bottom:10px;}
+  .marl-bar-track{background:var(--bg-panel-raised); border-radius:4px; height:8px; overflow:hidden; border:1px solid var(--line);}
+  .marl-bar-fill{height:100%; background:linear-gradient(90deg,var(--safe),var(--amber)); width:0%; transition:width 0.6s ease;}
+  .marl-pct{font-family:'JetBrains Mono',monospace; font-size:24px; font-weight:700; margin:8px 0 4px 0;}
+  .marl-note{font-size:11px; color:var(--text-dim); line-height:1.4;}
+
+  .leaflet-popup-content-wrapper{background:var(--bg-panel-raised); color:var(--text); border:1px solid var(--line);}
+  .leaflet-popup-content{font-family:'JetBrains Mono',monospace; font-size:12px;}
+  .leaflet-popup-tip{background:var(--bg-panel-raised);}
+</style>
+</head>
+<body>
+
+<div class="ticker-bar">
+  <div class="brand">SCOUT<span>-01</span></div>
+  <div class="status-dot" id="statusDot"></div>
+  <div class="status-label" id="statusLabel">connecting…</div>
+  <div class="ticker-track">
+    <div class="ticker-content" id="tickerContent">
+      <span>waiting for telemetry…</span>
+    </div>
+  </div>
+</div>
+
+<div class="layout">
+  <div id="map"></div>
+
+  <div class="sidebar">
+    <div class="panel">
+      <h2>Live Readings</h2>
+      <div class="stat-grid">
+        <div class="stat"><div class="label">Smoke (MQ-2)</div><div class="value ember" id="v-mq2">–</div></div>
+        <div class="stat"><div class="label">Methane (MQ-4)</div><div class="value" id="v-mq4">–</div></div>
+        <div class="stat"><div class="label">CO (MQ-7)</div><div class="value ember" id="v-mq7">–</div></div>
+        <div class="stat"><div class="label">Air Quality (MQ-135)</div><div class="value" id="v-mq135">–</div></div>
+        <div class="stat"><div class="label">Thermal max</div><div class="value thermal" id="v-tmax">–</div></div>
+        <div class="stat"><div class="label">Hotspots</div><div class="value" id="v-hotspots">–</div></div>
+      </div>
+      <canvas id="chart"></canvas>
+    </div>
+
+    <div class="panel marl-panel">
+      <h2>Marl Coverage (image analysis)</h2>
+      <img id="marlImg" src="" alt="latest capture" style="display:none;">
+      <canvas id="marlCanvas" style="display:none;"></canvas>
+      <div class="marl-pct" id="marlPct">–%</div>
+      <div class="marl-bar-track"><div class="marl-bar-fill" id="marlBar"></div></div>
+      <div class="marl-note">Estimated by client-side color-threshold analysis of the latest capture (v1 method — see notes).</div>
+    </div>
+
+    <div class="panel grow">
+      <h2>Event Log</h2>
+      <div id="log"></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+<script type="module">
+// ---------------------------------------------------------------------------
+// FIREBASE CONFIG — your real project config
+// ---------------------------------------------------------------------------
+const firebaseConfig = {
+  apiKey: "AIzaSyCHz7t7BX5tgd6WU6Vva91U-XV594ykCuI",
+    authDomain: "thermal-rover.firebaseapp.com",
+    projectId: "thermal-rover",
+    storageBucket: "thermal-rover.firebasestorage.app",
+    messagingSenderId: "556524522694",
+    appId: "1:556524522694:web:9203d413db994450ee9bc7"
+};
+
+const DEMO_MODE = firebaseConfig.apiKey === "YOUR_API_KEY";
+
+// ---------------------------------------------------------------------------
+// Map setup
+// ---------------------------------------------------------------------------
+const map = L.map('map', { zoomControl: true }).setView([19.3, -81.25], 16); // Cayman Islands default center
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 20, attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+function hazardColor(reading) {
+  const hot = (reading.thermal?.max_c || 0) > 38;
+  const gas = (reading.gas_ppm?.mq2_smoke || 0) > 150 || (reading.gas_ppm?.mq7_co || 0) > 50;
+  if (hot && gas) return '#c6491d';   // ember — correlated hazard
+  if (hot || gas) return '#d9a441';   // amber — single-sensor flag
+  return '#6b8f5a';                   // safe
+}
+
+function plotReading(r) {
+  if (r.lat == null || r.lon == null) return;
+  const color = hazardColor(r);
+  const marker = L.circleMarker([r.lat, r.lon], {
+    radius: 7, color, fillColor: color, fillOpacity: 0.85, weight: 1
+  }).addTo(map);
+  marker.bindPopup(
+    `<b>seq ${r.seq ?? '–'}</b><br>` +
+    `smoke: ${r.gas_ppm?.mq2_smoke ?? '–'} ppm<br>` +
+    `CO: ${r.gas_ppm?.mq7_co ?? '–'} ppm<br>` +
+    `thermal max: ${r.thermal?.max_c ?? '–'}°C`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Chart setup
+// ---------------------------------------------------------------------------
+const chart = new Chart(document.getElementById('chart'), {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [
+      { label: 'Smoke ppm', data: [], borderColor: '#e0693a', tension: 0.3, pointRadius: 0 },
+      { label: 'Thermal max °C', data: [], borderColor: '#4c8c8c', tension: 0.3, pointRadius: 0 }
+    ]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { labels: { color: '#948f7d', boxWidth: 10, font: { size: 10 } } } },
+    scales: {
+      x: { ticks: { color: '#948f7d', font: { size: 9 } }, grid: { color: '#3a382c' } },
+      y: { ticks: { color: '#948f7d', font: { size: 9 } }, grid: { color: '#3a382c' } }
+    }
+  }
+});
+
+function pushChartPoint(r) {
+  const label = new Date(r.server_time || Date.now()).toLocaleTimeString();
+  chart.data.labels.push(label);
+  chart.data.datasets[0].data.push(r.gas_ppm?.mq2_smoke ?? null);
+  chart.data.datasets[1].data.push(r.thermal?.max_c ?? null);
+  if (chart.data.labels.length > 30) {
+    chart.data.labels.shift();
+    chart.data.datasets.forEach(d => d.data.shift());
+  }
+  chart.update('none');
+}
+
+// ---------------------------------------------------------------------------
+// Stat tiles + ticker + log
+// ---------------------------------------------------------------------------
+function updateStats(r) {
+  document.getElementById('v-mq2').textContent = (r.gas_ppm?.mq2_smoke ?? '–') + ' ppm';
+  document.getElementById('v-mq4').textContent = (r.gas_ppm?.mq4_methane ?? '–') + ' ppm';
+  document.getElementById('v-mq7').textContent = (r.gas_ppm?.mq7_co ?? '–') + ' ppm';
+  document.getElementById('v-mq135').textContent = (r.gas_ppm?.mq135_voc ?? '–') + ' ppm';
+  document.getElementById('v-tmax').textContent = (r.thermal?.max_c ?? '–') + '°C';
+  document.getElementById('v-hotspots').textContent = r.thermal?.hotspot_count ?? '–';
+}
+
+function pushTicker(r) {
+  const el = document.getElementById('tickerContent');
+  const hot = hazardColor(r) === '#c6491d';
+  const bit = `<span>SEQ ${r.seq ?? '–'} · <b class="${hot ? 'hot' : ''}">SMOKE ${r.gas_ppm?.mq2_smoke ?? '–'}ppm</b> · CH4 ${r.gas_ppm?.mq4_methane ?? '–'}ppm · CO ${r.gas_ppm?.mq7_co ?? '–'}ppm · <b class="${hot ? 'hot' : ''}">MAX ${r.thermal?.max_c ?? '–'}°C</b></span>`;
+  el.innerHTML = bit + el.innerHTML;
+}
+
+function pushLog(r) {
+  const log = document.getElementById('log');
+  const item = document.createElement('div');
+  const hot = hazardColor(r) === '#c6491d';
+  item.className = 'log-item' + (hot ? ' alert' : '');
+  const time = new Date(r.server_time || Date.now()).toLocaleTimeString();
+  item.innerHTML = `<span>${time}</span><b>${hot ? 'HAZARD FLAG' : 'reading logged'} · seq ${r.seq ?? '–'}</b>`;
+  log.prepend(item);
+  while (log.children.length > 40) log.removeChild(log.lastChild);
+}
+
+// ---------------------------------------------------------------------------
+// Marl coverage estimate (client-side, color-threshold v1 method)
+// Marl reads as a light tan/gray/off-white surface — approximate with an
+// HSV window. This is the fast first version; swap in a trained
+// Teachable-Machine / TF.js model later without touching the rest of the app.
+// ---------------------------------------------------------------------------
+function estimateMarlCoverage(imgEl) {
+  const canvas = document.getElementById('marlCanvas');
+  const w = canvas.width = imgEl.naturalWidth || 200;
+  const h = canvas.height = imgEl.naturalHeight || 150;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(imgEl, 0, 0, w, h);
+  const data = ctx.getImageData(0, 0, w, h).data;
+
+  let marlPixels = 0;
+  const totalPixels = w * h;
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const lightness = (max + min) / 2 / 255;
+    const saturation = max === min ? 0 : (max - min) / (255 - Math.abs(max + min - 255));
+    // marl: fairly bright, fairly low saturation (tan/gray/off-white)
+    if (lightness > 0.55 && saturation < 0.25) marlPixels++;
+  }
+  return Math.round((marlPixels / totalPixels) * 100);
+}
+
+function updateMarlPanel(r) {
+  if (!r.image_url) return;
+  const imgEl = document.getElementById('marlImg');
+  imgEl.crossOrigin = 'anonymous';
+  imgEl.style.display = 'block';
+  imgEl.onload = () => {
+    const pct = estimateMarlCoverage(imgEl);
+    document.getElementById('marlPct').textContent = pct + '%';
+    document.getElementById('marlBar').style.width = pct + '%';
+  };
+  imgEl.src = r.image_url;
+}
+
+// ---------------------------------------------------------------------------
+// Master handler for each new reading, wherever it comes from
+// ---------------------------------------------------------------------------
+function handleReading(r) {
+  plotReading(r);
+  updateStats(r);
+  pushChartPoint(r);
+  pushTicker(r);
+  pushLog(r);
+  updateMarlPanel(r);
+}
+
+// ---------------------------------------------------------------------------
+// Firebase live listener (real mode)
+// ---------------------------------------------------------------------------
+async function startFirebase() {
+  const { initializeApp } = await import("https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js");
+  const { getFirestore, collection, query, orderBy, limit, onSnapshot } =
+    await import("https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js");
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  const q = query(collection(db, "readings"), orderBy("server_time", "desc"), limit(1));
+
+  document.getElementById('statusLabel').textContent = 'live · cellular';
+  onSnapshot(q, snap => {
+    snap.docChanges().forEach(change => {
+      if (change.type === 'added') handleReading(change.doc.data());
+    });
+  }, err => {
+    console.error(err);
+    document.getElementById('statusLabel').textContent = 'connection error — check console';
+    document.getElementById('statusDot').style.background = '#c6491d';
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Demo mode — lets you see the whole dashboard working before Firebase is wired up
+// ---------------------------------------------------------------------------
+function startDemo() {
+  document.getElementById('statusDot').classList.add('demo');
+  document.getElementById('statusLabel').textContent = 'demo mode — sample data (set firebaseConfig to go live)';
+  let seq = 1000;
+  const centerLat = 19.3, centerLon = -81.25;
+  setInterval(() => {
+    seq++;
+    const spike = Math.random() < 0.15;
+    const reading = {
+      seq,
+      server_time: Date.now(),
+      lat: centerLat + (Math.random() - 0.5) * 0.004,
+      lon: centerLon + (Math.random() - 0.5) * 0.004,
+      gas_ppm: {
+        mq2_smoke: Math.round(40 + Math.random() * 60 + (spike ? 150 : 0)),
+        mq4_methane: Math.round(8 + Math.random() * 20),
+        mq7_co: Math.round(3 + Math.random() * 15 + (spike ? 60 : 0)),
+        mq135_voc: Math.round(100 + Math.random() * 150)
+      },
+      thermal: {
+        max_c: Math.round((24 + Math.random() * 10 + (spike ? 15 : 0)) * 10) / 10,
+        hotspot_count: spike ? Math.ceil(Math.random() * 3) : 0
+      },
+      image_url: null
+    };
+    handleReading(reading);
+  }, 2500);
+}
+
+if (DEMO_MODE) {
+  startDemo();
+} else {
+  startFirebase();
+}
+</script>
+</body>
+</html>

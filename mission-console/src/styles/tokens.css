@@ -1,0 +1,63 @@
+/* ===========================================================================
+   Design tokens.
+
+   Reference period: early-2000s Mac OS X / NASA mission pages. That look is
+   carried by four things, none of them decorative — Lucida Grande and Monaco
+   at small sizes, thin mid-grey rules rather than heavy black frames, flat
+   light-grey title bars, and a faint desktop pinstripe. Corners stay square.
+
+   Palette is greyscale plus exactly one functional accent. The accent means
+   one thing — a value past its alarm threshold — and is never used for
+   selection, branding, or emphasis. Selection is expressed by inversion.
+   =========================================================================== */
+:root {
+  /* --- ink / paper ------------------------------------------------------ */
+  --ink:      #000000;
+  --ink-2:    #444444;  /* secondary text */
+  --ink-3:    #767676;  /* tertiary text, disabled (4.5:1 on white) */
+  --paper:    #ffffff;
+  --paper-2:  #ececec;  /* title bars, zebra striping */
+  --paper-3:  #dcdcdc;  /* fills, meter troughs, hover */
+  --paper-zebra: #f6f6f6;  /* table striping — light, since rows are unframed */
+
+  /* --- rules ------------------------------------------------------------
+     Mid-grey frames, not black: the period's panel chrome sat back from the
+     content rather than boxing it in. Text contrast is unaffected. */
+  --rule:        #8c8c8c;  /* panel frames */
+  --rule-2:      #c8c8c8;  /* hairline dividers inside a frame */
+  --rule-strong: #333333;  /* app bar and other major separators */
+
+  /* --- the one accent --------------------------------------------------- */
+  --accent:      #cc2200;
+  --accent-weak: #ffecea;  /* flattened tint, not a gradient */
+
+  /* --- type -------------------------------------------------------------
+     Period-correct system stacks. No webfonts, no network requests. */
+  --font-ui: "Lucida Grande", "Lucida Sans Unicode", Geneva, Verdana, Tahoma,
+    sans-serif;
+  --font-mono: Monaco, "Andale Mono", "Courier New", Courier, monospace;
+
+  --fs-2xs: 9px;
+  --fs-xs:  10px;
+  --fs-sm:  11px;
+  --fs-md:  12px;
+  --fs-lg:  14px;
+  --fs-xl:  17px;
+  --fs-2xl: 22px;
+
+  /* Tracking is tight. Wide letter-spacing on uppercase labels was reading as
+     stretched at these sizes. */
+  --track-caps: 0.02em;
+
+  /* --- 4px spacing scale ------------------------------------------------ */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+
+  /* --- geometry --------------------------------------------------------- */
+  --radius: 0;
+}

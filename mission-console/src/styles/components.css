@@ -1,0 +1,479 @@
+/* ===========================================================================
+   Components.
+
+   No component draws a closed frame. Grouping is carried by horizontal rules,
+   whitespace and type weight; vertical hairlines are used only as dividers
+   between cells, never joined into a box. Selection is a rule, not a fill.
+   =========================================================================== */
+
+/* --- panel ----------------------------------------------------------------
+   A section is a band on the page: heavy rule above, light rule below, open
+   at both sides.
+   -------------------------------------------------------------------------- */
+.panel {
+  background: none;
+  border: 0;
+  border-top: 2px solid var(--ink);
+  border-bottom: 1px solid var(--rule-2);
+}
+
+.panel__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: var(--s2) 0 var(--s1);
+  border-bottom: 1px solid var(--rule-2);
+}
+
+.panel__title {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+}
+
+.panel__meta {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.panel__body { padding: var(--s3) 0; }
+.panel__body--flush { padding: 0; }
+
+/* --- status tag ------------------------------------------------------------
+   Brackets do the containing, so the tag needs no border of its own.
+   -------------------------------------------------------------------------- */
+.tag {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: var(--track-caps);
+  white-space: nowrap;
+}
+.tag--ok      { color: var(--ink); }
+.tag--caution { color: var(--ink); font-weight: 700; }
+.tag--alarm   { color: var(--accent); }
+.tag--muted   { color: var(--ink-3); }
+
+/* --- readout (KPI) ---------------------------------------------------------
+   A reserved left rail marks a breach. One border, one edge — no corners.
+   -------------------------------------------------------------------------- */
+.readout {
+  border-left: 3px solid transparent;
+  border-bottom: 1px solid var(--rule-2);
+  padding: var(--s1) var(--s3) var(--s2);
+}
+.readout--breach { border-left-color: var(--accent); }
+
+.readout__label {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s2);
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+}
+
+.readout__value {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  line-height: 1.25;
+}
+.readout__value--breach { color: var(--accent); }
+.readout__unit {
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  color: var(--ink-2);
+  margin-left: 2px;
+}
+.readout__note {
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  color: var(--ink-3);
+}
+
+.readout-grid {
+  display: grid;
+  gap: var(--s2) var(--s4);
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+/* --- meter ---------------------------------------------------------------- */
+.meter {
+  height: 8px;
+  background: var(--paper-3);
+}
+.meter__fill {
+  height: 100%;
+  background: var(--ink);
+}
+.meter__fill--alarm { background: var(--accent); }
+
+/* --- definition list ------------------------------------------------------- */
+.deflist {
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+.deflist__row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: var(--s1) 0;
+  border-bottom: 1px solid var(--rule-2);
+}
+.deflist__row:last-child { border-bottom: 0; }
+.deflist dt { color: var(--ink-2); }
+.deflist dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  text-align: right;
+}
+
+/* --- data table ------------------------------------------------------------
+   Horizontal rules only. Zebra striping is full-bleed within the row, so it
+   reads as a band rather than a filled cell.
+   -------------------------------------------------------------------------- */
+.tablewrap { overflow-x: auto; }
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+
+.table caption { text-align: left; }
+
+.table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: left;
+  font-size: var(--fs-2xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+  color: var(--ink-2);
+  background: var(--paper);
+  padding: var(--s1) var(--s3) var(--s2);
+  border-bottom: 1px solid var(--ink);
+  white-space: nowrap;
+}
+
+.table td {
+  padding: var(--s2) var(--s3);
+  border-bottom: 1px solid var(--rule-2);
+  vertical-align: top;
+}
+
+.table tbody tr:nth-child(even) td { background: var(--paper-zebra); }
+.table tbody tr:hover td { background: var(--paper-3); }
+
+.table .col--num {
+  text-align: right;
+  font-family: var(--font-mono);
+}
+.table th.col--num { text-align: right; }
+
+.table .cell--breach {
+  color: var(--accent);
+  font-weight: 700;
+}
+.table .cell--muted { color: var(--ink-3); }
+
+/* Reserved rail on every first cell so marking a row cannot shift the grid. */
+.table td:first-child,
+.table th:first-child { border-left: 3px solid transparent; }
+.table tr.row--marked td:first-child { border-left-color: var(--accent); }
+.table tr.row--done td { color: var(--ink-3); }
+
+/* --- summary bar ----------------------------------------------------------- */
+.summary {
+  display: flex;
+  align-items: stretch;
+  border-top: 2px solid var(--ink);
+  border-bottom: 1px solid var(--rule-2);
+  border-left: 4px solid transparent;
+}
+.summary--alarm { border-left-color: var(--accent); }
+
+.summary__text {
+  flex: 1;
+  min-width: 0;
+  padding: var(--s3) var(--s4) var(--s3) var(--s3);
+}
+.summary__title {
+  font-size: var(--fs-lg);
+  margin-bottom: 2px;
+}
+.summary__title--alarm { color: var(--accent); }
+.summary__body {
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+  max-width: 78ch;
+}
+
+.summary__metrics {
+  display: flex;
+  flex-shrink: 0;
+}
+.summary__metric {
+  padding: var(--s3) var(--s4);
+  border-left: 1px solid var(--rule-2);
+  min-width: 104px;
+}
+.summary__metric dt {
+  font-size: var(--fs-2xs);
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+  color: var(--ink-3);
+}
+.summary__metric dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-lg);
+  font-weight: 700;
+}
+
+@media (max-width: 1100px) {
+  .summary { flex-direction: column; }
+  .summary__metrics { border-top: 1px solid var(--rule-2); }
+  .summary__metric:first-child { border-left: 0; }
+}
+
+/* --- segmented control (day selector) ---------------------------------------
+   Selection is a 3px baseline rule, not a filled block.
+   -------------------------------------------------------------------------- */
+.segmented {
+  display: flex;
+  border-bottom: 1px solid var(--rule);
+  overflow-x: auto;
+}
+.segmented__item {
+  flex: 1 1 0;
+  min-width: 132px;
+  text-align: left;
+  padding: var(--s2) var(--s3);
+  border-left: 1px solid var(--rule-2);
+  border-bottom: 3px solid transparent;
+  color: var(--ink-2);
+}
+.segmented__item:first-child { border-left: 0; }
+.segmented__item:hover { color: var(--ink); }
+.segmented__item[aria-pressed="true"] {
+  color: var(--ink);
+  border-bottom-color: var(--ink);
+}
+
+.segmented__label,
+.segmented__value,
+.segmented__meta { display: block; }
+
+.segmented__label {
+  font-size: var(--fs-2xs);
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+  color: var(--ink-3);
+}
+.segmented__item[aria-pressed="true"] .segmented__label { color: var(--ink-2); }
+.segmented__value {
+  font-family: var(--font-mono);
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  line-height: 1.2;
+}
+.segmented__meta {
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  color: var(--ink-3);
+}
+
+/* --- gantt strip ------------------------------------------------------------
+   Baseline rule only; the blocks themselves are the data marks.
+   -------------------------------------------------------------------------- */
+.gantt {
+  position: relative;
+  height: 26px;
+  border-bottom: 1px solid var(--ink);
+  overflow: visible;
+}
+
+.gantt__gridline {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--rule-2);
+}
+
+.gantt__block {
+  position: absolute;
+  top: 4px;
+  bottom: 0;
+  background: var(--ink);
+  border-right: 1px solid var(--paper);
+}
+.gantt__block--done { background: var(--ink-3); }
+.gantt__block--marked { background: var(--accent); }
+
+/* Current time. Stays legible on top of an accent-filled active block via a
+   1px paper outline, and overhangs the track at both ends. */
+.gantt__now {
+  position: absolute;
+  top: -5px;
+  bottom: -5px;
+  width: 2px;
+  background: var(--accent);
+  outline: 1px solid var(--paper);
+  z-index: 2;
+}
+.gantt__now::after {
+  content: "";
+  position: absolute;
+  left: -3px;
+  top: -5px;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--accent);
+}
+
+/* Ticks sit at their true proportion of the window, not evenly distributed. */
+.gantt__axis {
+  position: relative;
+  height: 14px;
+  margin-top: var(--s1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  color: var(--ink-3);
+}
+.gantt__tick {
+  position: absolute;
+  top: 0;
+  white-space: nowrap;
+}
+
+/* --- chart ------------------------------------------------------------------
+   The SVG carries its own width/height and is measured to the container, so it
+   must not be stretched by CSS.
+   -------------------------------------------------------------------------- */
+.chart { margin: 0; }
+.chart svg { display: block; }
+
+.chart__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s4);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+  margin-bottom: var(--s2);
+}
+.chart__swatch {
+  display: inline-block;
+  width: 18px;
+  height: 0;
+  vertical-align: middle;
+  margin-right: var(--s1);
+  border-top: 2px solid var(--ink);
+}
+.chart__swatch--dashed { border-top-style: dashed; }
+.chart__swatch--accent { border-top-color: var(--accent); }
+
+/* crispEdges keeps 1px rules on the pixel grid at integer coordinates */
+.chart__grid {
+  stroke: var(--rule-2);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+.chart__axis {
+  stroke: var(--ink);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+.chart__tick {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  fill: var(--ink-3);
+}
+.chart__line {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 1.25;
+  stroke-linejoin: round;
+}
+.chart__line--dashed { stroke-dasharray: 4 3; }
+.chart__threshold {
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  shape-rendering: crispEdges;
+}
+
+/* --- thermal map ------------------------------------------------------------ */
+.thermal__canvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 32 / 24;
+  /* 32x24 backing store scaled up: keep sensor pixels as hard squares. */
+  image-rendering: pixelated;
+}
+.thermal__scale {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-top: var(--s2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  color: var(--ink-3);
+}
+.thermal__ramp {
+  flex: 1;
+  display: flex;
+  height: 8px;
+}
+.thermal__ramp i { flex: 1; }
+
+/* --- event log --------------------------------------------------------------- */
+.log {
+  max-height: 280px;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+.log__row {
+  display: flex;
+  gap: var(--s3);
+  padding: var(--s1) var(--s3);
+  border-bottom: 1px solid var(--rule-2);
+  border-left: 3px solid transparent;
+}
+.log__row:last-child { border-bottom: 0; }
+.log__time { color: var(--ink-3); flex-shrink: 0; }
+.log__text { color: var(--ink-2); }
+.log__row--alarm {
+  border-left-color: var(--accent);
+  background: var(--accent-weak);
+}
+.log__row--alarm .log__text { color: var(--accent); font-weight: 700; }
+.log__row--caution .log__text { color: var(--ink); font-weight: 700; }
+
+/* --- misc --------------------------------------------------------------------- */
+.note {
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+  max-width: 62ch;
+}
+.subsys__bus {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  color: var(--ink-3);
+}

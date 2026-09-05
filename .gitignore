@@ -1,0 +1,24 @@
+# Environment secrets
+.env
+
+# Service account keys
+firebase-key.json
+*.key.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Captures (generated at runtime)
+captures/

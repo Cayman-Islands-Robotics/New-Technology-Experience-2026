@@ -1,0 +1,17 @@
+# /etc/udev/rules.d/99-control-hub-reconnect.rules
+#
+# The Control Hub enumerates as 2207:0011 (Fuzhou Rockchip Electronics
+# Company Smart Tab) over USB. Whenever this device appears -- hub
+# reboot, cable reseat, hub power cycle, Pi reboot -- restart
+# gps-uplink.service so it does a full adb kill-server / start-server /
+# forward reset (see start_gps_uplink.sh) instead of silently sitting
+# on stale forwards that no longer point at anything.
+#
+# This is what replaces the manual:
+#   adb kill-server
+#   sudo pkill -9 adb
+#   adb start-server
+#   sudo systemctl restart gps-uplink
+# dance -- udev now does it automatically the moment the hub shows up.
+
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="2207", ATTR{idProduct}=="0011", RUN+="/usr/bin/systemctl restart gps-uplink.service"

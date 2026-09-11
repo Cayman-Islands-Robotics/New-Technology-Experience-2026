@@ -1,0 +1,15 @@
+# /etc/sudoers.d/adb-pkill
+#
+# Lets the orangepi user run "sudo pkill -9 adb" without a password
+# prompt -- needed because gps-uplink.service runs headless (no TTY),
+# so it can never answer an interactive password prompt. Scoped to
+# exactly this one command, nothing broader.
+#
+# A root-owned adb process (likely from the board's usbdevice/adbc
+# process tied to Rockchip's USB gadget/FunctionFS support, separate
+# from our own android-tools-adb install) reappears at boot and can't
+# be killed by a plain non-sudo "adb kill-server" -- only root can
+# kill a root-owned process. This is what start_gps_uplink.sh uses to
+# clear it automatically every run instead of needing it typed by hand.
+
+orangepi ALL=(root) NOPASSWD: /usr/bin/pkill -9 adb

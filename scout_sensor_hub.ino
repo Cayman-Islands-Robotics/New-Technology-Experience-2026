@@ -1,248 +1,427 @@
 /*
-  scout_sensor_hub.ino
-  Runs on the Arduino UNO R4 WiFi.
+  scout_firestore.ino
+  Runs on the Arduino UNO R4 WiFi -- NO Raspberry Pi needed.
 
-  Reads the MLX90640 thermal camera + 2 MQ gas sensors (analog), packages
-  each reading as one line of JSON over USB serial -- matching the schema
-  pi_sensor_publisher.py expects. Periodically triggers an Arducam still
-  capture and streams the raw JPEG bytes over the same serial link, wrapped
-  in header/footer JSON markers so the Pi can tell where the image starts
-  and ends.
+  What it does:
+    - Connects to WiFi.
+    - Signs in to Firebase Authentication (anonymous, or email/password).
+    - Reads the 4 MQ gas sensors (new PCB pin mapping) + optional MLX90640
+      thermal camera.
+    - Writes one document per reading into Firestore (same schema the Pi
+      used, so the dashboard keeps working) with a server-side timestamp
+      in "server_time".
+    - Optionally captures an ArduCAM still every IMAGE_INTERVAL_MS, uploads
+      it to Firebase Storage, and puts its URL in "image_url" on readings.
+    - Optionally runs a tiny local web server (GET /reading, GET /image)
+      so a device on the same WiFi can poll the board directly.
 
-  Also runs a tiny WiFi HTTP server so the dashboard can poll this board
-  directly (GET /reading -> latest JSON, GET /image -> live JPEG) when the
-  Pi isn't in the loop yet -- e.g. for a demo on a phone hotspot.
+  ===========================================================================
+  LIBRARIES TO INSTALL  (Arduino IDE -> Tools -> Manage Libraries...)
+  ===========================================================================
+    - ArduinoHttpClient      (by Arduino)
+    - ArduinoJson            (by Benoit Blanchon) -- version 7.x
+    - Adafruit MLX90640      (only if USE_THERMAL is 1; accept its dependencies)
+    - ArduCAM                (only if USE_CAMERA is 1; install from ArduCAM's
+                              GitHub, NOT in Library Manager. In its
+                              memorysaver.h enable the line for your module,
+                              e.g. OV2640_MINI_2MP)
+    - WiFiS3                 (built in with the "Arduino UNO R4 Boards" package
+                              -- Tools -> Board -> Boards Manager)
 
-  Libraries needed (Arduino IDE -> Tools -> Manage Libraries):
-    - Adafruit MLX90640
-    - ArduinoJson
-    - ArduCAM (install per ArduCAM's own GitHub instructions -- their library
-      isn't in the standard Library Manager index)
-    - WiFiS3 (built in to the UNO R4 WiFi board package)
+  Also: update the R4's WiFi firmware (Tools -> Firmware Updater in IDE 2.x).
+  Old firmware has outdated HTTPS certificates and Google connections fail.
 
-  NOTE: this is a starting sketch, not a finished one. A few things are
-  placeholders you'll need to tune on the bench -- flagged with comments
-  below. Exact API calls for Adafruit_MLX90640 and ArduCAM can vary a bit
-  by library version, so double check function names against whatever
-  version you actually install.
+  ===========================================================================
+  FIREBASE CONSOLE SETUP (one time)
+  ===========================================================================
+    1. Authentication -> Sign-in method -> enable "Anonymous"
+       (or "Email/Password" if you fill in AUTH_EMAIL / AUTH_PASSWORD below
+       -- then also create that user under Authentication -> Users).
+    2. Project settings -> General -> copy the "Web API key" into
+       FIREBASE_API_KEY below. (If there's no web API key yet, add a Web
+       app to the project first.) If you've restricted that key to HTTP
+       referrers in Google Cloud Console, the Arduino's requests will be
+       rejected -- leave it unrestricted or allow these APIs.
+    3. Firestore rules must allow authenticated creates in "readings".
+    4. Storage rules must allow authenticated uploads to "images/"
+       (only if UPLOAD_IMAGES_TO_STORAGE is 1).
+       See the rules in the chat message that came with this file.
 
-  Wiring: matches the wiring chart from earlier -- shared I2C bus (SDA/SCL)
-  for MLX90640 + Arducam, SPI pins 10-13 to Arducam, A0/A1 to the 2 gas
-  sensors currently wired (MQ-2 smoke, MQ-4 methane).
-
-  On boot this sketch:
-    1. Connects to WiFi and starts the local web server.
-    2. Runs a self-test -- confirms the thermal camera responds and does
-       one test capture with the ArduCAM to confirm the SPI image path
-       works end to end.
-    3. Runs a ~3 minute warm-up period (gas sensor heaters need this to
-       give stable readings) before starting normal telemetry.
+  Everything you need to change is in the "CHANGE ME" section below.
 */
 
+// ===========================================================================
+// ======================  CHANGE ME  ========================================
+// ===========================================================================
+
+// ---- Feature switches (1 = on, 0 = off) -----------------------------------
+#define USE_THERMAL                1   // MLX90640 wired on I2C?
+#define USE_CAMERA                 1   // ArduCAM wired on SPI (CS = pin 10)?
+#define UPLOAD_IMAGES_TO_STORAGE   1   // upload stills to Firebase Storage (needs USE_CAMERA)
+#define ENABLE_LOCAL_WEBSERVER     1   // serve /reading and /image on port 80
+
+// ---- WiFi -------------------------------------------------------------------
+// Must be a normal WPA2 password network (home router / phone hotspot).
+// University/office "enterprise" WiFi (eduroam, username+password login,
+// or a sign-in web page) will NOT work on the UNO R4 -- use a hotspot.
+const char* WIFI_SSID = "DIGICEL-0D4A";        // <-- CHANGE ME
+const char* WIFI_PASS = "AMYBR3ERAQD11";    // <-- CHANGE ME
+
+// ---- Firebase ---------------------------------------------------------------
+const char* FIREBASE_API_KEY        = "AIzaSyCHz7t7BX5tgd6WU6Vva91U-XV594ykCuI";                   // <-- CHANGE ME (Project settings -> General)
+const char* FIREBASE_PROJECT_ID     = "thermal-rover";                      // <-- CHANGE ME if different
+const char* FIREBASE_STORAGE_BUCKET = "thermal-rover.firebasestorage.app";  // <-- CHANGE ME if different (Storage page, without gs://)
+const char* READINGS_COLLECTION     = "readings";                           // Firestore collection the dashboard reads
+
+// Leave both empty ("") to sign in anonymously.
+// Fill both in to sign in as a specific Firebase email/password user instead.
+const char* AUTH_EMAIL    = "";    // <-- optional
+const char* AUTH_PASSWORD = "";    // <-- optional
+
+// Name for this board. Letters, numbers and dashes only (it goes into URLs).
+const char* DEVICE_ID = "scout-01";
+
+// ---- Timing -----------------------------------------------------------------
+// Firestore free tier = 20,000 writes/day. 5 s = 720 writes/hour.
+const unsigned long PUBLISH_INTERVAL_MS = 5000;     // how often a reading is written
+const unsigned long IMAGE_INTERVAL_MS   = 30000;    // how often a still is uploaded
+const unsigned long WARMUP_MS           = 180000UL; // MQ heater warm-up (3 min). Set 0 to skip.
+
+// ---- Location ---------------------------------------------------------------
+// No GPS indoors. Set USE_FIXED_LOCATION true to stamp every reading with a
+// fixed lat/lon (e.g. the demo room) so dashboard maps still show a pin.
+// If false, lat/lon are written as null.
+const bool   USE_FIXED_LOCATION = false;
+const double FIXED_LAT = 53.7632;     // <-- CHANGE ME if used
+const double FIXED_LON = -2.7031;     // <-- CHANGE ME if used
+
+// ---- Thermal ----------------------------------------------------------------
+const float HOTSPOT_THRESHOLD_C = 38.0;   // tune against the room's ambient temperature
+
+// ---- Gas sensors ------------------------------------------------------------
+// Circuit assumed on each sensor:   5V -- MQ -- AOUT -- RL -- GND
+//   Rs = RL * (VCC / VOUT - 1)
+//   ppm = A * (Rs / Ro)^B
+//
+// rlKOhm : load resistor on YOUR PCB for that sensor, in kOhm.  <-- CHECK ME
+//          (look at the resistor next to each sensor / your PCB schematic)
+// roKOhm : sensor resistance in clean air, in kOhm. Starting guesses only;
+//          overwritten at boot if CALIBRATE_RO_AT_BOOT is true.
+// A, B   : approximate datasheet curve fits.
+// cleanAirRatio : datasheet Rs/Ro in clean air (used for boot calibration).
+//
+// All ppm values are rough estimates, not safety-grade measurements.
+// MQ-2 is cross-sensitive (reported as LPG-equivalent). MQ-7 is only
+// accurate with heater cycling, which this PCB doesn't do. MQ-135 is a
+// general air-quality/VOC indicator -- treat it as relative.
+const bool CALIBRATE_RO_AT_BOOT = true;   // true = measure Ro after warm-up. Only do this in clean air!
+
+struct MQSensor {
+  const char* label;      // for Serial output
+  const char* key;        // field name in Firestore (matches the old dashboard schema)
+  int   pin;
+  float rlKOhm;           // <-- CHECK ME per your PCB
+  float roKOhm;
+  float curveA;
+  float curveB;
+  float cleanAirRatio;
+};
+
+// Pin mapping per the new PCB: A0 MQ-4, A1 MQ-7, A2 MQ-2, A3 MQ-135
+MQSensor gasSensors[] = {
+  //  label     key            pin  RL     Ro     A         B        clean-air Rs/Ro
+  { "MQ-4",   "mq4_methane",  A0,  20.0f, 47.5f, 1012.7f,  -2.786f,  4.4f  },
+  { "MQ-7",   "mq7_co",       A1,  10.0f, 10.0f,   99.042f, -1.518f, 27.5f  },
+  { "MQ-2",   "mq2_smoke",    A2,   5.0f, 10.0f,  574.25f,  -2.222f,  9.83f },
+  { "MQ-135", "mq135_voc",    A3,  10.0f, 10.0f,  110.47f,  -2.862f,  3.6f  },
+};
+
+// ===========================================================================
+// ======================  END OF CHANGE ME  =================================
+// ===========================================================================
+
+#include <WiFiS3.h>
+#include <ArduinoHttpClient.h>
+#include <ArduinoJson.h>
 #include <Wire.h>
 #include <SPI.h>
-#include <ArduinoJson.h>
-#include <Adafruit_MLX90640.h>
-#include <ArduCAM.h>
-#include <WiFiS3.h>
 #include <math.h>
 
-// ---------------------------------------------------------------------------
-// CONFIG
-// ---------------------------------------------------------------------------
-#define ARDUCAM_CS_PIN 10
-const unsigned long TELEMETRY_INTERVAL_MS = 1000;    // send sensor JSON once per second
-const unsigned long IMAGE_INTERVAL_MS     = 15000;   // capture + send a still every 15s
-const unsigned long WARMUP_MS             = 180000UL; // 3 minutes gas-sensor warm-up
-const float HOTSPOT_THRESHOLD_C = 38.0;              // PLACEHOLDER -- tune once you know ambient baseline at the dump
+#if USE_THERMAL
+#include <Adafruit_MLX90640.h>
+#endif
 
-// PLACEHOLDER -- fill in for tonight's demo
-const char* WIFI_SSID = "Palantir Drone";
-const char* WIFI_PASS = "12345678";
+#if USE_CAMERA
+#include <ArduCAM.h>
+#endif
 
-// Static IP so the Arduino always gets the same address on this hotspot.
-// Use the IP that already worked for you as local_IP. Gateway is almost
-// always the .1 address on the same subnet (check your phone's hotspot
-// info screen if unsure). Subnet 255.255.255.0 is correct for the vast
-// majority of phone hotspots.
-IPAddress local_IP(192, 168, 43, 50);   // <-- set to an IP on your hotspot's subnet, not already in use
-IPAddress gateway(192, 168, 43, 1);     // <-- your hotspot's gateway (usually .1)
-IPAddress subnet(255, 255, 255, 0);
+const int NUM_GAS = sizeof(gasSensors) / sizeof(gasSensors[0]);
+const float GAS_VCC     = 5.0f;
+const float GAS_ADC_MAX = 4095.0f;   // 12-bit ADC
+const int   GAS_SAMPLES = 10;
 
+const char* AUTH_HOST      = "identitytoolkit.googleapis.com";
+const char* TOKEN_HOST     = "securetoken.googleapis.com";
+const char* FIRESTORE_HOST = "firestore.googleapis.com";
+const char* STORAGE_HOST   = "firebasestorage.googleapis.com";
+
+const unsigned long TOKEN_REFRESH_MS = 50UL * 60UL * 1000UL;   // ID tokens last 60 min; refresh at 50
+
+WiFiSSLClient ssl;
+
+#if ENABLE_LOCAL_WEBSERVER
 WiFiServer server(80);
-String latestJson = "{}";
+#endif
 
+#if USE_THERMAL
 Adafruit_MLX90640 mlx;
+float frame[32 * 24];
+bool thermalOk = false;
+#endif
+
+#if USE_CAMERA
+#define ARDUCAM_CS_PIN 10
+const uint32_t MAX_JPEG_BYTES = 500000;
 ArduCAM myCAM(OV2640, ARDUCAM_CS_PIN);
+bool cameraOk = false;
+#endif
 
-float frame[32 * 24];       // raw thermal frame buffer (32x24 pixels)
-unsigned long lastTelemetry = 0;
-unsigned long lastImage = 0;
+String idToken = "";
+String refreshToken = "";
+unsigned long tokenObtainedAt = 0;
+
+String latestJson = "{}";
+String latestImageUrl = "";
+
 unsigned long seq = 0;
+unsigned long lastPublish = 0;
+unsigned long lastImage = 0;
+unsigned long warmupStart = 0;
+unsigned long lastWarmupPrint = 0;
+bool warmupDone = false;
 
 // ---------------------------------------------------------------------------
-// MQ gas conversion
+// Helpers
 // ---------------------------------------------------------------------------
-//
-// Assumed analogue circuit:
-//
-//   5V -- MQ sensor -- AOUT -- RL -- GND
-//
-// For that arrangement:
-//
-//   Rs = RL x (VCC / VOUT - 1)
-//
-// The values below are fixed nominal assumptions. No startup calibration is
-// performed.
-//
-// IMPORTANT:
-// - MQ-2 is cross-sensitive to LPG, methane, hydrogen, alcohol vapour, smoke,
-//   propane and other gases. Its result is labelled LPG-equivalent.
-// - MQ-4 is intended primarily for methane.
-// - Both results are approximate and not safety-certified measurements.
+String randomId(int n) {
+  const char* chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  String s;
+  s.reserve(n);
+  for (int i = 0; i < n; i++) s += chars[random(62)];
+  return s;
+}
+
+// POST a body over HTTPS. Returns HTTP status (or negative on connection error).
+int httpsPost(const char* host, const String& path, const char* contentType,
+              const String& body, const String& authHeader, String& responseOut) {
+  HttpClient http(ssl, host, 443);
+  http.setHttpResponseTimeout(15000);
+
+  http.beginRequest();
+  int err = http.post(path.c_str());
+  if (err != 0) {
+    http.stop();
+    return -1;
+  }
+  http.sendHeader("Content-Type", contentType);
+  http.sendHeader("Content-Length", (int)body.length());
+  if (authHeader.length() > 0) http.sendHeader("Authorization", authHeader.c_str());
+  http.beginBody();
+  http.print(body);
+  http.endRequest();
+
+  int status = http.responseStatusCode();
+  responseOut = http.responseBody();
+  http.stop();
+  return status;
+}
+
 // ---------------------------------------------------------------------------
+// Firebase Auth
+// ---------------------------------------------------------------------------
+bool firebaseSignIn() {
+  bool useEmail = strlen(AUTH_EMAIL) > 0 && strlen(AUTH_PASSWORD) > 0;
 
-const float GAS_VCC = 5.0f;
-const float GAS_ADC_MAX = 4095.0f;  // 12-bit ADC because analogReadResolution(12)
+  JsonDocument req;
+  if (useEmail) {
+    req["email"] = AUTH_EMAIL;
+    req["password"] = AUTH_PASSWORD;
+  }
+  req["returnSecureToken"] = true;
+  String body;
+  serializeJson(req, body);
 
-// Approximate load resistors in kOhm.
-const float MQ2_RL_KOHM = 5.0f;
-const float MQ4_RL_KOHM = 20.0f;
+  String path = String("/v1/accounts:") + (useEmail ? "signInWithPassword" : "signUp") +
+                "?key=" + FIREBASE_API_KEY;
 
-// Fixed nominal baseline sensor resistances in kOhm.
-const float MQ2_RO_KOHM = 10.0f;
-const float MQ4_RO_KOHM = 47.5f;
+  Serial.println(useEmail ? "[auth] signing in with email/password..." : "[auth] signing in anonymously...");
+  String resp;
+  int status = httpsPost(AUTH_HOST, path, "application/json", body, "", resp);
+  if (status != 200) {
+    Serial.print("[auth] FAILED, HTTP ");
+    Serial.println(status);
+    Serial.println(resp);
+    Serial.println("[auth] Check FIREBASE_API_KEY and that the sign-in method is enabled in the console.");
+    return false;
+  }
 
-// Approximate curves:
-//
-//   ppm = A x pow(Rs / Ro, B)
-//
-// MQ-2: LPG-equivalent approximation.
-const float MQ2_LPG_A = 574.25f;
-const float MQ2_LPG_B = -2.222f;
+  JsonDocument r;
+  if (deserializeJson(r, resp)) {
+    Serial.println("[auth] could not parse sign-in response");
+    return false;
+  }
+  idToken = r["idToken"].as<String>();
+  refreshToken = r["refreshToken"].as<String>();
+  tokenObtainedAt = millis();
+  Serial.println("[auth] OK");
+  return idToken.length() > 0;
+}
 
-// MQ-4: methane approximation.
-const float MQ4_METHANE_A = 1012.7f;
-const float MQ4_METHANE_B = -2.786f;
+bool firebaseRefresh() {
+  if (refreshToken.length() == 0) return false;
+  String path = String("/v1/token?key=") + FIREBASE_API_KEY;
+  String body = "grant_type=refresh_token&refresh_token=" + refreshToken;
+  String resp;
+  int status = httpsPost(TOKEN_HOST, path, "application/x-www-form-urlencoded", body, "", resp);
+  if (status != 200) {
+    Serial.print("[auth] refresh failed, HTTP ");
+    Serial.println(status);
+    return false;
+  }
+  JsonDocument r;
+  if (deserializeJson(r, resp)) return false;
+  idToken = r["id_token"].as<String>();
+  refreshToken = r["refresh_token"].as<String>();
+  tokenObtainedAt = millis();
+  Serial.println("[auth] token refreshed");
+  return idToken.length() > 0;
+}
 
-float rawToVoltage(int raw) {
-  return ((float)raw * GAS_VCC) / GAS_ADC_MAX;
+bool ensureAuth() {
+  if (idToken.length() == 0) return firebaseSignIn();
+  if (millis() - tokenObtainedAt > TOKEN_REFRESH_MS) {
+    if (!firebaseRefresh()) return firebaseSignIn();
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Plain JSON -> Firestore REST "typed value" JSON (recursive)
+// e.g. 12 -> {"integerValue":"12"},  {"a":1} -> {"mapValue":{"fields":{...}}}
+// Note: Firestore does NOT allow arrays inside arrays.
+// ---------------------------------------------------------------------------
+void toFirestoreValue(JsonVariantConst src, JsonObject dst) {
+  if (src.isNull()) {
+    dst["nullValue"] = nullptr;
+  } else if (src.is<bool>()) {
+    dst["booleanValue"] = src.as<bool>();
+  } else if (src.is<long>()) {
+    dst["integerValue"] = String(src.as<long>());
+  } else if (src.is<unsigned long>()) {
+    dst["integerValue"] = String(src.as<unsigned long>());
+  } else if (src.is<double>()) {
+    dst["doubleValue"] = src.as<double>();
+  } else if (src.is<const char*>()) {
+    dst["stringValue"] = src.as<const char*>();
+  } else if (src.is<JsonObjectConst>()) {
+    JsonObject fields = dst["mapValue"]["fields"].to<JsonObject>();
+    for (JsonPairConst kv : src.as<JsonObjectConst>()) {
+      toFirestoreValue(kv.value(), fields[kv.key()].to<JsonObject>());
+    }
+  } else if (src.is<JsonArrayConst>()) {
+    JsonArray values = dst["arrayValue"]["values"].to<JsonArray>();
+    for (JsonVariantConst item : src.as<JsonArrayConst>()) {
+      toFirestoreValue(item, values.add<JsonObject>());
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Gas maths
+// ---------------------------------------------------------------------------
+int readGasAveraged(int pin) {
+  long total = 0;
+  for (int i = 0; i < GAS_SAMPLES; i++) {
+    total += analogRead(pin);
+    delay(2);
+  }
+  return total / GAS_SAMPLES;
 }
 
 float rawToRsKOhm(int raw, float rlKOhm) {
-  if (raw <= 0 || raw >= (int)GAS_ADC_MAX) {
-    return NAN;
-  }
-
-  float voltage = rawToVoltage(raw);
-
-  if (voltage <= 0.001f || voltage >= GAS_VCC) {
-    return NAN;
-  }
-
-  return rlKOhm * ((GAS_VCC / voltage) - 1.0f);
+  if (raw <= 0 || raw >= (int)GAS_ADC_MAX) return NAN;
+  float v = ((float)raw * GAS_VCC) / GAS_ADC_MAX;
+  if (v <= 0.001f || v >= GAS_VCC) return NAN;
+  return rlKOhm * ((GAS_VCC / v) - 1.0f);
 }
 
-float rsToPPM(
-  float rsKOhm,
-  float roKOhm,
-  float curveA,
-  float curveB
-) {
-  if (!isfinite(rsKOhm) ||
-      !isfinite(roKOhm) ||
-      rsKOhm <= 0.0f ||
-      roKOhm <= 0.0f) {
-    return NAN;
-  }
-
-  float ratio = rsKOhm / roKOhm;
-  float ppm = curveA * pow(ratio, curveB);
-
-  // Prevent invalid or absurd output from ADC saturation/noise.
-  if (!isfinite(ppm) || ppm < 0.0f) {
-    return NAN;
-  }
-
+float rawToPPM(const MQSensor& s, int raw) {
+  float rs = rawToRsKOhm(raw, s.rlKOhm);
+  if (!isfinite(rs) || rs <= 0.0f || s.roKOhm <= 0.0f) return NAN;
+  float ppm = s.curveA * pow(rs / s.roKOhm, s.curveB);
+  if (!isfinite(ppm) || ppm < 0.0f || ppm > 1000000.0f) return NAN;
   return ppm;
 }
 
-float rawToPPM_MQ2(int raw) {
-  float rsKOhm = rawToRsKOhm(raw, MQ2_RL_KOHM);
-
-  // MQ-2 result is LPG-equivalent, not gas-specific.
-  return rsToPPM(
-    rsKOhm,
-    MQ2_RO_KOHM,
-    MQ2_LPG_A,
-    MQ2_LPG_B
-  );
-}
-
-float rawToPPM_MQ4(int raw) {
-  float rsKOhm = rawToRsKOhm(raw, MQ4_RL_KOHM);
-
-  // MQ-4 result is an approximate methane estimate.
-  return rsToPPM(
-    rsKOhm,
-    MQ4_RO_KOHM,
-    MQ4_METHANE_A,
-    MQ4_METHANE_B
-  );
-}
-
-void setup() {
-  Serial.begin(115200);
-  while (!Serial) { ; }
-
-  Wire.begin();
-
-  if (!mlx.begin(MLX90640_I2CADDR_DEFAULT, &Wire)) {
-    Serial.println("{\"error\":\"MLX90640 not found -- check wiring/address\"}");
-    while (1) { delay(1000); }
-  }
-  mlx.setMode(MLX90640_CHESS);
-  mlx.setResolution(MLX90640_ADC_18BIT);
-  mlx.setRefreshRate(MLX90640_4_HZ);
-
-  SPI.begin();
-  pinMode(ARDUCAM_CS_PIN, OUTPUT);
-  myCAM.write_reg(0x07, 0x80);
-  delay(100);
-  myCAM.write_reg(0x07, 0x00);
-  delay(100);
-  myCAM.set_format(JPEG);
-  myCAM.InitCAM();
-  myCAM.OV2640_set_JPEG_size(OV2640_320x240);   // keep resolution low -- this is going over serial, not USB video
-
-  analogReadResolution(12);  // UNO R4 supports up to 14-bit; 12-bit keeps the ppm math simple for now
-
-  connectWiFi();
-  runSelfTest();
-  runWarmup();
-}
-
-void loop() {
-  handleWebClient();
-
-  unsigned long now = millis();
-
-  if (now - lastTelemetry >= TELEMETRY_INTERVAL_MS) {
-    lastTelemetry = now;
-    sendTelemetry();
-  }
-
-  if (now - lastImage >= IMAGE_INTERVAL_MS) {
-    lastImage = now;
-    captureAndSendImage();
+void calibrateRo() {
+  Serial.println("[gas] calibrating Ro in clean air...");
+  for (int i = 0; i < NUM_GAS; i++) {
+    float sum = 0;
+    int good = 0;
+    for (int k = 0; k < 20; k++) {
+      float rs = rawToRsKOhm(readGasAveraged(gasSensors[i].pin), gasSensors[i].rlKOhm);
+      if (isfinite(rs)) { sum += rs; good++; }
+      delay(50);
+    }
+    if (good > 0) {
+      gasSensors[i].roKOhm = (sum / good) / gasSensors[i].cleanAirRatio;
+    }
+    Serial.print("  ");
+    Serial.print(gasSensors[i].label);
+    Serial.print(" Ro = ");
+    Serial.print(gasSensors[i].roKOhm, 2);
+    Serial.println(good > 0 ? " kOhm" : " kOhm (calibration FAILED, kept default)");
   }
 }
 
 // ---------------------------------------------------------------------------
-// WiFi + local web server (for demo / direct dashboard polling)
+// Camera helpers
+// ---------------------------------------------------------------------------
+#if USE_CAMERA
+uint32_t captureToFifo() {
+  myCAM.flush_fifo();
+  myCAM.clear_fifo_flag();
+  myCAM.start_capture();
+  unsigned long t = millis();
+  while (!myCAM.get_bit(ARDUCHIP_TRIG, CAP_DONE_MASK)) {
+    if (millis() - t > 3000) return 0;
+  }
+  uint32_t len = myCAM.read_fifo_length();
+  if (len == 0 || len > MAX_JPEG_BYTES) return 0;
+  return len;
+}
+
+// Streams the captured JPEG in 512-byte chunks (much faster than 1 byte at a time over WiFi).
+void streamFifoTo(Client& out, uint32_t len) {
+  uint8_t buf[512];
+  myCAM.CS_LOW();
+  myCAM.set_fifo_burst();
+  uint32_t remaining = len;
+  while (remaining > 0) {
+    size_t n = remaining > sizeof(buf) ? sizeof(buf) : remaining;
+    for (size_t i = 0; i < n; i++) buf[i] = SPI.transfer(0x00);
+    out.write(buf, n);
+    remaining -= n;
+  }
+  myCAM.CS_HIGH();
+}
+#endif
+
+// ---------------------------------------------------------------------------
+// WiFi
 // ---------------------------------------------------------------------------
 void connectWiFi() {
-  Serial.print("Connecting to WiFi: ");
+  Serial.print("[wifi] connecting to ");
   Serial.println(WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
@@ -252,511 +431,401 @@ void connectWiFi() {
     Serial.print(".");
     if (millis() - start > 20000) {
       Serial.println();
-      Serial.println("WiFi FAILED to connect -- check SSID/password. Continuing without WiFi.");
+      Serial.println("[wifi] FAILED -- check WIFI_SSID / WIFI_PASS. Will retry.");
       return;
     }
   }
   Serial.println();
 
-  // Sometimes status flips to CONNECTED a moment before DHCP actually
-  // hands out an address -- retry reading it for a few seconds.
   IPAddress ip = WiFi.localIP();
   unsigned long ipStart = millis();
   while (ip == IPAddress(0, 0, 0, 0) && millis() - ipStart < 5000) {
     delay(300);
     ip = WiFi.localIP();
   }
-
-  Serial.print("Arduino IP address: ");
+  Serial.print("[wifi] connected, IP = ");
   Serial.println(ip);
-  Serial.print("WiFi status code: ");
-  Serial.println(WiFi.status());   // 3 = WL_CONNECTED, useful if this ever misbehaves again
+
+#if ENABLE_LOCAL_WEBSERVER
   server.begin();
+  Serial.print("[web] local server at http://");
+  Serial.print(ip);
+  Serial.println("/reading");
+#endif
 }
 
+void ensureWiFi() {
+  static unsigned long lastAttempt = 0;
+  if (WiFi.status() == WL_CONNECTED) return;
+  if (lastAttempt != 0 && millis() - lastAttempt < 15000) return;
+  lastAttempt = millis();
+  connectWiFi();
+}
+
+// ---------------------------------------------------------------------------
+// Build one reading (plain JSON, same schema the Pi used)
+// ---------------------------------------------------------------------------
+void buildReading(JsonDocument& doc) {
+  doc["device_id"] = DEVICE_ID;
+  doc["seq"] = seq;
+  doc["millis"] = millis();
+
+#if USE_THERMAL
+  JsonObject thermal = doc["thermal"].to<JsonObject>();
+  bool ok = thermalOk && (mlx.getFrame(frame) == 0);
+  if (ok) {
+    float maxC = -999, sumC = 0;
+    int hotspotCount = 0;
+    JsonArray hp = thermal["hotspot_px"].to<JsonArray>();
+    for (int i = 0; i < 32 * 24; i++) {
+      float t = frame[i];
+      sumC += t;
+      if (t > maxC) maxC = t;
+      if (t > HOTSPOT_THRESHOLD_C) {
+        hotspotCount++;
+        if (hotspotCount <= 10) {         // only list the first 10 pixels
+          JsonObject p = hp.add<JsonObject>();
+          p["x"] = i % 32;
+          p["y"] = i / 32;
+        }
+      }
+    }
+    thermal["max_c"] = round(maxC * 10) / 10.0;
+    thermal["avg_c"] = round((sumC / (32 * 24)) * 10) / 10.0;
+    thermal["hotspot_count"] = hotspotCount;
+  } else {
+    thermal["max_c"] = nullptr;
+    thermal["avg_c"] = nullptr;
+    thermal["hotspot_count"] = 0;
+    thermal["hotspot_px"].to<JsonArray>();
+  }
+#endif
+
+  JsonObject gasPpm = doc["gas_ppm"].to<JsonObject>();
+  JsonObject gasRaw = doc["gas_raw"].to<JsonObject>();
+  for (int i = 0; i < NUM_GAS; i++) {
+    int raw = readGasAveraged(gasSensors[i].pin);
+    float ppm = rawToPPM(gasSensors[i], raw);
+    gasRaw[gasSensors[i].key] = raw;
+    if (isfinite(ppm)) gasPpm[gasSensors[i].key] = (long)lroundf(ppm);
+    else               gasPpm[gasSensors[i].key] = nullptr;
+  }
+
+  doc["image_available"] = latestImageUrl.length() > 0;
+  if (latestImageUrl.length() > 0) doc["image_url"] = latestImageUrl;
+  else                             doc["image_url"] = nullptr;
+
+  if (USE_FIXED_LOCATION) {
+    doc["lat"] = FIXED_LAT;
+    doc["lon"] = FIXED_LON;
+  } else {
+    doc["lat"] = nullptr;
+    doc["lon"] = nullptr;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Firestore publish
+// ---------------------------------------------------------------------------
+void publishReading() {
+  seq++;
+
+  JsonDocument reading;
+  buildReading(reading);
+
+  latestJson = "";
+  serializeJson(reading, latestJson);
+  Serial.println(latestJson);
+
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (!ensureAuth()) return;
+
+  // Build a Firestore "commit" request: create the document with a random ID
+  // and set server_time to the server's clock (like SERVER_TIMESTAMP on the Pi).
+  String docName = String("projects/") + FIREBASE_PROJECT_ID +
+                   "/databases/(default)/documents/" + READINGS_COLLECTION + "/" + randomId(20);
+
+  JsonDocument body;
+  JsonObject write = body["writes"].add<JsonObject>();
+  JsonObject update = write["update"].to<JsonObject>();
+  update["name"] = docName;
+  JsonObject fields = update["fields"].to<JsonObject>();
+  for (JsonPairConst kv : reading.as<JsonObjectConst>()) {
+    toFirestoreValue(kv.value(), fields[kv.key()].to<JsonObject>());
+  }
+  JsonObject transform = write["updateTransforms"].add<JsonObject>();
+  transform["fieldPath"] = "server_time";
+  transform["setToServerValue"] = "REQUEST_TIME";
+
+  String bodyStr;
+  serializeJson(body, bodyStr);
+
+  String path = String("/v1/projects/") + FIREBASE_PROJECT_ID + "/databases/(default)/documents:commit";
+  String resp;
+  int status = httpsPost(FIRESTORE_HOST, path, "application/json", bodyStr, "Bearer " + idToken, resp);
+
+  if (status == 200) {
+    Serial.print("[firestore] published seq=");
+    Serial.println(seq);
+  } else {
+    Serial.print("[firestore] FAILED, HTTP ");
+    Serial.println(status);
+    Serial.println(resp.substring(0, 400));
+    if (status == 401) idToken = "";   // token rejected -> sign in again next time
+    if (status == 403) Serial.println("[firestore] 403 = permission denied. Check your Firestore rules.");
+    if (status == 404) Serial.println("[firestore] 404 = check FIREBASE_PROJECT_ID and that Firestore is created.");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Firebase Storage image upload
+// ---------------------------------------------------------------------------
+#if USE_CAMERA && UPLOAD_IMAGES_TO_STORAGE
+void captureAndUploadImage() {
+  if (!cameraOk || WiFi.status() != WL_CONNECTED) return;
+  if (!ensureAuth()) return;
+
+  uint32_t len = captureToFifo();
+  if (len == 0) {
+    Serial.println("[image] capture failed");
+    return;
+  }
+
+  String objectPath = String("images/") + DEVICE_ID + "_" + randomId(10) + ".jpg";
+  String encoded = objectPath;
+  encoded.replace("/", "%2F");
+  String path = String("/v0/b/") + FIREBASE_STORAGE_BUCKET + "/o?uploadType=media&name=" + encoded;
+
+  Serial.print("[image] uploading ");
+  Serial.print(len);
+  Serial.println(" bytes...");
+
+  HttpClient http(ssl, STORAGE_HOST, 443);
+  http.setHttpResponseTimeout(20000);
+  http.beginRequest();
+  if (http.post(path.c_str()) != 0) {
+    Serial.println("[image] connection failed");
+    http.stop();
+    return;
+  }
+  http.sendHeader("Content-Type", "image/jpeg");
+  http.sendHeader("Content-Length", (int)len);
+  String auth = "Firebase " + idToken;
+  http.sendHeader("Authorization", auth.c_str());
+  http.beginBody();
+  streamFifoTo(http, len);
+  http.endRequest();
+
+  int status = http.responseStatusCode();
+  String resp = http.responseBody();
+  http.stop();
+
+  if (status != 200) {
+    Serial.print("[image] upload FAILED, HTTP ");
+    Serial.println(status);
+    Serial.println(resp.substring(0, 400));
+    if (status == 403) Serial.println("[image] 403 = check your Storage rules.");
+    return;
+  }
+
+  JsonDocument filter;
+  filter["downloadTokens"] = true;
+  JsonDocument r;
+  deserializeJson(r, resp, DeserializationOption::Filter(filter));
+  String token = r["downloadTokens"] | "";
+  int comma = token.indexOf(',');
+  if (comma > 0) token = token.substring(0, comma);
+  if (token.length() == 0) {
+    Serial.println("[image] uploaded but no download token returned");
+    return;
+  }
+
+  latestImageUrl = String("https://") + STORAGE_HOST + "/v0/b/" + FIREBASE_STORAGE_BUCKET +
+                   "/o/" + encoded + "?alt=media&token=" + token;
+  Serial.print("[image] OK: ");
+  Serial.println(latestImageUrl);
+}
+#endif
+
+// ---------------------------------------------------------------------------
+// Local web server (optional)
+// ---------------------------------------------------------------------------
+#if ENABLE_LOCAL_WEBSERVER
 void handleWebClient() {
   WiFiClient client = server.available();
   if (!client) return;
 
-  Serial.println("[web] client connected");
-
   unsigned long waitStart = millis();
   while (client.connected() && !client.available()) {
-    if (millis() - waitStart > 1000) {
-      Serial.println("[web] timed out waiting for request data");
-      client.stop();
-      return;
-    }
+    if (millis() - waitStart > 1000) { client.stop(); return; }
   }
 
-  String requestLine = client.readStringUntil('\r');   // e.g. "GET /image?t=123 HTTP/1.1"
+  String requestLine = client.readStringUntil('\r');
   while (client.available()) {
     String headerLine = client.readStringUntil('\r');
-    if (headerLine.length() <= 1) break;   // blank line = end of headers
+    if (headerLine.length() <= 1) break;
   }
-  Serial.print("[web] request: ");
-  Serial.println(requestLine);
 
+#if USE_CAMERA
   if (requestLine.indexOf("/image") >= 0) {
-    sendImageOverHttp(client);
-  } else {
-    client.println("HTTP/1.1 200 OK");
-    client.println("Content-Type: application/json");
-    client.println("Access-Control-Allow-Origin: *");
-    client.print("Content-Length: ");
-    client.println(latestJson.length());
-    client.println("Connection: close");
-    client.println();
-    client.print(latestJson);
-    client.flush();
-  }
-
-  delay(10);
-  client.stop();
-  Serial.println("[web] response sent, client closed");
-}
-
-// Triggers a fresh ArduCAM capture and streams the JPEG bytes directly to
-// the HTTP client -- not cached in RAM (the board doesn't have room to spare
-// for a second image buffer alongside WiFi + JSON + thermal frame data).
-// This means requesting /image takes ~1-2s to respond and briefly blocks
-// the main loop, same as the periodic Serial capture does.
-void sendImageOverHttp(WiFiClient &client) {
-  myCAM.flush_fifo();
-  myCAM.clear_fifo_flag();
-  myCAM.start_capture();
-
-  unsigned long waitStart = millis();
-  while (!myCAM.get_bit(ARDUCHIP_TRIG, CAP_DONE_MASK)) {
-    if (millis() - waitStart > 3000) {
-      client.println("HTTP/1.1 504 Gateway Timeout");
+    uint32_t len = cameraOk ? captureToFifo() : 0;
+    if (len == 0) {
+      client.println("HTTP/1.1 503 Service Unavailable");
       client.println("Connection: close");
       client.println();
-      return;
+    } else {
+      client.println("HTTP/1.1 200 OK");
+      client.println("Content-Type: image/jpeg");
+      client.println("Access-Control-Allow-Origin: *");
+      client.print("Content-Length: ");
+      client.println(len);
+      client.println("Connection: close");
+      client.println();
+      streamFifoTo(client, len);
     }
-  }
-
-  uint32_t len = myCAM.read_fifo_length();
-  if (len == 0 || len > 500000) {
-    client.println("HTTP/1.1 500 Internal Server Error");
-    client.println("Connection: close");
-    client.println();
+    client.flush();
+    delay(10);
+    client.stop();
     return;
   }
+#endif
 
   client.println("HTTP/1.1 200 OK");
-  client.println("Content-Type: image/jpeg");
+  client.println("Content-Type: application/json");
   client.println("Access-Control-Allow-Origin: *");
   client.print("Content-Length: ");
-  client.println(len);
+  client.println(latestJson.length());
   client.println("Connection: close");
   client.println();
-
-  myCAM.CS_LOW();
-  myCAM.set_fifo_burst();
-  for (uint32_t i = 0; i < len; i++) {
-    client.write(SPI.transfer(0x00));
-  }
-  myCAM.CS_HIGH();
+  client.print(latestJson);
   client.flush();
+  delay(10);
+  client.stop();
 }
+#endif
 
 // ---------------------------------------------------------------------------
-// Self-test -- run once at boot, prints PASS/FAIL info to Serial
+// Setup / self-test
 // ---------------------------------------------------------------------------
-void runSelfTest() {
-  // --- Thermal check ---
-  if (mlx.getFrame(frame) == 0) {
-    float minC = 999, maxC = -999, sumC = 0;
-    for (int i = 0; i < 32 * 24; i++) {
-      float t = frame[i];
-      sumC += t;
-      if (t < minC) minC = t;
-      if (t > maxC) maxC = t;
-    }
-    float avgC = sumC / (32 * 24);
-    Serial.print("Thermal min=");
-    Serial.print(minC, 2);
-    Serial.print(" C avg=");
-    Serial.print(avgC, 2);
-    Serial.print(" C max=");
-    Serial.print(maxC, 2);
-    Serial.println(" C");
-  } else {
-    Serial.println("Thermal FAIL -- no frame returned");
-  }
-
-  // --- Camera check -- do one real capture and report size ---
-  myCAM.flush_fifo();
-  myCAM.clear_fifo_flag();
-  myCAM.start_capture();
-
-  unsigned long waitStart = millis();
-  bool capOk = true;
-  while (!myCAM.get_bit(ARDUCHIP_TRIG, CAP_DONE_MASK)) {
-    if (millis() - waitStart > 3000) { capOk = false; break; }
-  }
-
-  if (capOk) {
-    uint32_t len = myCAM.read_fifo_length();
-    if (len > 0 && len < 500000) {
-      Serial.print("Camera PASS JPEG bytes=");
-      Serial.println(len);
-    } else {
-      Serial.println("Camera FAIL -- bad FIFO length");
-    }
-  } else {
-    Serial.println("Camera FAIL -- capture timed out");
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Warm-up -- MQ sensor heaters need a few minutes before readings settle
-// ---------------------------------------------------------------------------
-void runWarmup() {
-  Serial.println("Warming up gas sensors (3 min)...");
-  unsigned long warmupStart = millis();
-  unsigned long lastPrint = 0;
-
-  while (millis() - warmupStart < WARMUP_MS) {
-    handleWebClient();   // keep serving the web server during warmup too
-
-    unsigned long elapsed = millis() - warmupStart;
-    if (lastPrint == 0 || elapsed - lastPrint >= 10000) {
-      lastPrint = elapsed;
-      unsigned long remaining = (WARMUP_MS - elapsed) / 1000;
-      Serial.print("Warmup: ");
-      Serial.print(remaining);
-      Serial.print("s remaining -- MQ2 raw=");
-      Serial.print(analogRead(A0));
-      Serial.print(" MQ4 raw=");
-      Serial.println(analogRead(A1));
-    }
-  }
-  Serial.println("Warmup complete. Starting telemetry.");
-}
-
-// ---------------------------------------------------------------------------
-// Normal telemetry
-// ---------------------------------------------------------------------------
-void sendTelemetry() {
-  seq++;
-
-  // --- thermal frame ---
-  bool ok = (mlx.getFrame(frame) == 0);
-  float maxC = -999, sumC = 0;
-  int hotspotCount = 0;
-  int hotspotPx[10][2];   // cap reported hotspot pixels at 10 to keep the packet small
-  int hotspotFound = 0;
-
-  if (ok) {
-    for (int i = 0; i < 32 * 24; i++) {
-      float t = frame[i];
-      sumC += t;
-      if (t > maxC) maxC = t;
-      if (t > HOTSPOT_THRESHOLD_C && hotspotFound < 10) {
-        hotspotPx[hotspotFound][0] = i % 32;
-        hotspotPx[hotspotFound][1] = i / 32;
-        hotspotFound++;
-        hotspotCount++;
-      }
-    }
-  }
-  float avgC = ok ? (sumC / (32 * 24)) : -999;
-
-  // --- gas sensors ---
-  // Average several readings to reduce ADC noise.
-  const int GAS_SAMPLES = 10;
-
-  long mq2Total = 0;
-  long mq4Total = 0;
-
-  for (int i = 0; i < GAS_SAMPLES; i++) {
-    mq2Total += analogRead(A0);
-    mq4Total += analogRead(A1);
-    delay(2);
-  }
-
-  int rawMQ2 = mq2Total / GAS_SAMPLES;
-  int rawMQ4 = mq4Total / GAS_SAMPLES;
-
-  float mq2Ppm = rawToPPM_MQ2(rawMQ2);
-  float mq4Ppm = rawToPPM_MQ4(rawMQ4);
-
-  // --- build JSON (matches the schema pi_sensor_publisher.py / dashboard.html expect) ---
-  StaticJsonDocument<512> doc;
-  doc["seq"] = seq;
-  doc["millis"] = millis();
-
-  JsonObject thermal = doc.createNestedObject("thermal");
-  thermal["max_c"] = round(maxC * 10) / 10.0;
-  thermal["avg_c"] = round(avgC * 10) / 10.0;
-  thermal["hotspot_count"] = hotspotCount;
-  JsonArray hp = thermal.createNestedArray("hotspot_px");
-  for (int i = 0; i < hotspotFound; i++) {
-    JsonArray pair = hp.createNestedArray();
-    pair.add(hotspotPx[i][0]);
-    pair.add(hotspotPx[i][1]);
-  }
-
-  JsonObject gas = doc.createNestedObject("gas_ppm");
-
-  // MQ-2 is cross-sensitive, so this is LPG-equivalent rather than
-  // specifically smoke or methane.
-  if (isfinite(mq2Ppm)) {
-    gas["mq2_smoke"] = round(mq2Ppm);
-  } else {
-    gas["mq2_smoke"] = nullptr;
-  }
-
-  if (isfinite(mq4Ppm)) {
-    gas["mq4_methane"] = round(mq4Ppm);
-  } else {
-    gas["mq4_methane"] = nullptr;
-  }
-
-  doc["image_available"] = false;   // images are sent as a separate frame -- see captureAndSendImage()
-
-  serializeJson(doc, latestJson);   // cache for the web server
-  serializeJson(doc, Serial);
-  Serial.println();   // newline-delimited JSON: one line per reading, exactly what pi_sensor_publisher.py reads
-}
-
-void captureAndSendImage() {
-  myCAM.flush_fifo();
-  myCAM.clear_fifo_flag();
-  myCAM.start_capture();
-
-  unsigned long waitStart = millis();
-  while (!myCAM.get_bit(ARDUCHIP_TRIG, CAP_DONE_MASK)) {
-    if (millis() - waitStart > 3000) {   // don't hang forever if the camera glitches
-      Serial.println("{\"error\":\"image capture timed out\"}");
-      return;
-    }
-  }
-
-  uint32_t len = myCAM.read_fifo_length();
-  if (len == 0 || len > 500000) {
-    Serial.println("{\"error\":\"bad image length\"}");
-    return;
-  }
-
-  // Header line: tells the Pi an image is about to stream and exactly how
-  // many raw bytes to read before it hits the footer line.
-  StaticJsonDocument<128> header;
-  header["image_frame_start"] = true;
-  header["size"] = len;
-  serializeJson(header, Serial);
-  Serial.println();
-
-  myCAM.CS_LOW();
-  myCAM.set_fifo_burst();
-  for (uint32_t i = 0; i < len; i++) {
-    Serial.write(SPI.transfer(0x00));
-  }
-  myCAM.CS_HIGH();
-
-  Serial.println();
-  Serial.println("{\"image_frame_end\":true}");
-}
-/*
-  scout_sensor_hub.ino
-  Runs on the Arduino UNO R4 WiFi.
-
-  Reads the MLX90640 thermal camera + 4 MQ gas sensors (analog), packages
-  each reading as one line of JSON over USB serial -- matching the schema
-  pi_sensor_publisher.py expects. Periodically triggers an Arducam still
-  capture and streams the raw JPEG bytes over the same serial link, wrapped
-  in header/footer JSON markers so the Pi can tell where the image starts
-  and ends.
-
-  Libraries needed (Arduino IDE -> Tools -> Manage Libraries):
-    - Adafruit MLX90640
-    - ArduinoJson
-    - ArduCAM (install per ArduCAM's own GitHub instructions -- their library
-      isn't in the standard Library Manager index)
-
-  NOTE: this is a starting sketch, not a finished one. A few things are
-  placeholders you'll need to tune on the bench -- flagged with comments
-  below. Exact API calls for Adafruit_MLX90640 and ArduCAM can vary a bit
-  by library version, so double check function names against whatever
-  version you actually install.
-
-  Wiring: matches the wiring chart from earlier -- shared I2C bus (SDA/SCL)
-  for MLX90640 + Arducam, SPI pins 10-13 to Arducam, A0-A3 to the 4 gas
-  sensors (MQ-2, MQ-4, MQ-7, MQ-135).
-*/
-
-#include <Wire.h>
-#include <SPI.h>
-#include <ArduinoJson.h>
-#include <Adafruit_MLX90640.h>
-#include <ArduCAM.h>
-
-// ---------------------------------------------------------------------------
-// CONFIG
-// ---------------------------------------------------------------------------
-#define ARDUCAM_CS_PIN 10
-const unsigned long TELEMETRY_INTERVAL_MS = 1000;    // send sensor JSON once per second
-const unsigned long IMAGE_INTERVAL_MS     = 15000;   // capture + send a still every 15s
-const float HOTSPOT_THRESHOLD_C = 38.0;              // PLACEHOLDER -- tune once you know ambient baseline at the dump
-
-Adafruit_MLX90640 mlx;
-ArduCAM myCAM(OV2640, ARDUCAM_CS_PIN);
-
-float frame[32 * 24];       // raw thermal frame buffer (32x24 pixels)
-unsigned long lastTelemetry = 0;
-unsigned long lastImage = 0;
-unsigned long seq = 0;
-
-// ---------------------------------------------------------------------------
-// Gas sensor calibration -- PLACEHOLDER SCALING
-// These straight-line conversions are NOT real calibration curves. MQ
-// sensors need to be calibrated against known gas concentrations (or at
-// minimum a clean-air baseline reading) before these numbers mean anything
-// as true ppm. Treat these as relative signal strength for now, and swap
-// in real curves once you've done bench calibration -- see the sensor's
-// datasheet for its Rs/Ro-vs-ppm curve.
-// ---------------------------------------------------------------------------
-float rawToPPM_MQ2(int raw)   { return raw * 0.35; }   // smoke/LPG
-float rawToPPM_MQ4(int raw)   { return raw * 0.12; }   // methane
-float rawToPPM_MQ7(int raw)   { return raw * 0.08; }   // carbon monoxide
-float rawToPPM_MQ135(int raw) { return raw * 0.20; }   // air quality / VOC
-
 void setup() {
   Serial.begin(115200);
-  while (!Serial) { ; }
+  unsigned long t = millis();
+  while (!Serial && millis() - t < 3000) { ; }   // don't hang if running on battery with no USB
 
+  analogReadResolution(12);
+
+#if USE_THERMAL
   Wire.begin();
-
-  if (!mlx.begin(MLX90640_I2CADDR_DEFAULT, &Wire)) {
-    Serial.println("{\"error\":\"MLX90640 not found -- check wiring/address\"}");
-    while (1) { delay(1000); }
+  if (mlx.begin(MLX90640_I2CADDR_DEFAULT, &Wire)) {
+    mlx.setMode(MLX90640_CHESS);
+    mlx.setResolution(MLX90640_ADC_18BIT);
+    mlx.setRefreshRate(MLX90640_4_HZ);
+    thermalOk = true;
+    Serial.println("[thermal] MLX90640 found");
+  } else {
+    Serial.println("[thermal] MLX90640 NOT found -- check wiring. Continuing without it.");
   }
-  mlx.setMode(MLX90640_CHESS);
-  mlx.setResolution(MLX90640_ADC_18BIT);
-  mlx.setRefreshRate(MLX90640_4_HZ);
+#endif
 
+#if USE_CAMERA
+  #if !USE_THERMAL
+  Wire.begin();
+  #endif
   SPI.begin();
   pinMode(ARDUCAM_CS_PIN, OUTPUT);
+  digitalWrite(ARDUCAM_CS_PIN, HIGH);
   myCAM.write_reg(0x07, 0x80);
   delay(100);
   myCAM.write_reg(0x07, 0x00);
   delay(100);
-  myCAM.set_format(JPEG);
-  myCAM.InitCAM();
-  myCAM.OV2640_set_JPEG_size(OV2640_320x240);   // keep resolution low -- this is going over serial, not USB video
 
-  analogReadResolution(12);  // UNO R4 supports up to 14-bit; 12-bit keeps the ppm math simple for now
+  myCAM.write_reg(ARDUCHIP_TEST1, 0x55);
+  if (myCAM.read_reg(ARDUCHIP_TEST1) == 0x55) {
+    myCAM.set_format(JPEG);
+    myCAM.InitCAM();
+    myCAM.OV2640_set_JPEG_size(OV2640_320x240);
+    delay(500);
+    uint32_t len = captureToFifo();
+    cameraOk = len > 0;
+    Serial.print("[camera] ");
+    Serial.println(cameraOk ? "test capture OK, bytes=" + String(len) : String("test capture FAILED"));
+  } else {
+    Serial.println("[camera] SPI test FAILED -- check wiring. Continuing without camera.");
+  }
+#endif
+
+  String fv = WiFi.firmwareVersion();
+  Serial.print("[wifi] module firmware ");
+  Serial.println(fv);
+  if (fv < WIFI_FIRMWARE_LATEST_VERSION) {
+    Serial.println("[wifi] WARNING: firmware is out of date -- update it if HTTPS fails.");
+  }
+
+  connectWiFi();
+
+  randomSeed(micros() ^ ((unsigned long)analogRead(A0) << 12) ^ analogRead(A3));
+
+  if (WiFi.status() == WL_CONNECTED) ensureAuth();
+
+  warmupStart = millis();
+  if (WARMUP_MS == 0) {
+    warmupDone = true;
+  } else {
+    Serial.println("[gas] warming up sensors...");
+  }
 }
 
+void handleWarmup() {
+  unsigned long elapsed = millis() - warmupStart;
+  if (elapsed >= WARMUP_MS) {
+    warmupDone = true;
+    Serial.println("[gas] warm-up complete");
+    if (CALIBRATE_RO_AT_BOOT) calibrateRo();
+    lastPublish = millis() - PUBLISH_INTERVAL_MS;   // publish straight away
+    lastImage = millis() - IMAGE_INTERVAL_MS;       // and grab an image straight away
+    return;
+  }
+  if (lastWarmupPrint == 0 || elapsed - lastWarmupPrint >= 10000) {
+    lastWarmupPrint = elapsed == 0 ? 1 : elapsed;
+    Serial.print("[gas] warm-up ");
+    Serial.print((WARMUP_MS - elapsed) / 1000);
+    Serial.print("s left --");
+    for (int i = 0; i < NUM_GAS; i++) {
+      Serial.print(" ");
+      Serial.print(gasSensors[i].label);
+      Serial.print("=");
+      Serial.print(analogRead(gasSensors[i].pin));
+    }
+    Serial.println();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Main loop
+// ---------------------------------------------------------------------------
 void loop() {
-  unsigned long now = millis();
+  ensureWiFi();
 
-  if (now - lastTelemetry >= TELEMETRY_INTERVAL_MS) {
-    lastTelemetry = now;
-    sendTelemetry();
-  }
+#if ENABLE_LOCAL_WEBSERVER
+  if (WiFi.status() == WL_CONNECTED) handleWebClient();
+#endif
 
-  if (now - lastImage >= IMAGE_INTERVAL_MS) {
-    lastImage = now;
-    captureAndSendImage();
-  }
-}
-
-void sendTelemetry() {
-  seq++;
-
-  // --- thermal frame ---
-  bool ok = (mlx.getFrame(frame) == 0);
-  float maxC = -999, sumC = 0;
-  int hotspotCount = 0;
-  int hotspotPx[10][2];   // cap reported hotspot pixels at 10 to keep the packet small
-  int hotspotFound = 0;
-
-  if (ok) {
-    for (int i = 0; i < 32 * 24; i++) {
-      float t = frame[i];
-      sumC += t;
-      if (t > maxC) maxC = t;
-      if (t > HOTSPOT_THRESHOLD_C && hotspotFound < 10) {
-        hotspotPx[hotspotFound][0] = i % 32;
-        hotspotPx[hotspotFound][1] = i / 32;
-        hotspotFound++;
-        hotspotCount++;
-      }
-    }
-  }
-  float avgC = ok ? (sumC / (32 * 24)) : -999;
-
-  // --- gas sensors ---
-  int rawMQ2   = analogRead(A0);
-  int rawMQ4   = analogRead(A1);
-  int rawMQ7   = analogRead(A2);
-  int rawMQ135 = analogRead(A3);
-
-  // --- build JSON (matches the schema pi_sensor_publisher.py / dashboard.html expect) ---
-  StaticJsonDocument<512> doc;
-  doc["seq"] = seq;
-  doc["millis"] = millis();
-
-  JsonObject thermal = doc.createNestedObject("thermal");
-  thermal["max_c"] = round(maxC * 10) / 10.0;
-  thermal["avg_c"] = round(avgC * 10) / 10.0;
-  thermal["hotspot_count"] = hotspotCount;
-  JsonArray hp = thermal.createNestedArray("hotspot_px");
-  for (int i = 0; i < hotspotFound; i++) {
-    JsonArray pair = hp.createNestedArray();
-    pair.add(hotspotPx[i][0]);
-    pair.add(hotspotPx[i][1]);
-  }
-
-  JsonObject gas = doc.createNestedObject("gas_ppm");
-  gas["mq2_smoke"]   = round(rawToPPM_MQ2(rawMQ2));
-  gas["mq4_methane"] = round(rawToPPM_MQ4(rawMQ4));
-  gas["mq7_co"]      = round(rawToPPM_MQ7(rawMQ7));
-  gas["mq135_voc"]   = round(rawToPPM_MQ135(rawMQ135));
-
-  doc["image_available"] = false;   // images are sent as a separate frame -- see captureAndSendImage()
-
-  serializeJson(doc, Serial);
-  Serial.println();   // newline-delimited JSON: one line per reading, exactly what pi_sensor_publisher.py reads
-}
-
-void captureAndSendImage() {
-  myCAM.flush_fifo();
-  myCAM.clear_fifo_flag();
-  myCAM.start_capture();
-
-  unsigned long waitStart = millis();
-  while (!myCAM.get_bit(ARDUCHIP_TRIG, CAP_DONE_MASK)) {
-    if (millis() - waitStart > 3000) {   // don't hang forever if the camera glitches
-      Serial.println("{\"error\":\"image capture timed out\"}");
-      return;
-    }
-  }
-
-  uint32_t len = myCAM.read_fifo_length();
-  if (len == 0 || len > 500000) {
-    Serial.println("{\"error\":\"bad image length\"}");
+  if (!warmupDone) {
+    handleWarmup();
     return;
   }
 
-  // Header line: tells the Pi an image is about to stream and exactly how
-  // many raw bytes to read before it hits the footer line.
-  StaticJsonDocument<128> header;
-  header["image_frame_start"] = true;
-  header["size"] = len;
-  serializeJson(header, Serial);
-  Serial.println();
+  unsigned long now = millis();
 
-  myCAM.CS_LOW();
-  myCAM.set_fifo_burst();
-  for (uint32_t i = 0; i < len; i++) {
-    Serial.write(SPI.transfer(0x00));
+#if USE_CAMERA && UPLOAD_IMAGES_TO_STORAGE
+  if (now - lastImage >= IMAGE_INTERVAL_MS) {
+    lastImage = now;
+    captureAndUploadImage();
   }
-  myCAM.CS_HIGH();
+#endif
 
-  Serial.println();
-  Serial.println("{\"image_frame_end\":true}");
+  if (millis() - lastPublish >= PUBLISH_INTERVAL_MS) {
+    lastPublish = millis();
+    publishReading();
+  }
 }

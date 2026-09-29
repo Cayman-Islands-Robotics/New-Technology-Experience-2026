@@ -16,10 +16,11 @@ const STATE = {
   idle: { level: 'muted', code: 'STANDBY', text: 'No telemetry.' },
 };
 
-export function AppBar({ level, now, warmingUp }) {
-  const s = warmingUp
-    ? { level: 'caution', code: 'WARMUP', text: 'Gas sensors below operating temperature.' }
-    : (STATE[level] ?? STATE.idle);
+export function AppBar({ level, now, connection }) {
+  const s =
+    connection === 'error' || connection === 'unconfigured'
+      ? { level: 'alarm', code: 'OFFLINE', text: 'Not connected to Firestore.' }
+      : (STATE[level] ?? STATE.idle);
 
   return (
     <header className="appbar">

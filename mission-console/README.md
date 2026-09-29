@@ -1,10 +1,12 @@
 # SCOUT-01 Console
 
 Operator console for the thermal rover: mission **schedule**, subsystem
-**status**, and **live telemetry**. Runs entirely on a simulated reading
-stream — no Firebase, Pi, or Arduino required to exercise every path.
+**status**, and **live telemetry**. Telemetry comes only from the Firestore
+`readings` collection in the `thermal-rover` project — there is no simulated
+data. Until the collection has a document, the Status and Live tabs say so.
 
 ```
+cp .env.example .env.local   # Firebase web config
 npm install
 npm run dev       # http://localhost:5173
 npm run build     # static bundle -> dist/
@@ -26,10 +28,10 @@ The interface is deliberately utilitarian. These are enforced, not aspirational:
   animation: none !important` guard so motion cannot be reintroduced by a later
   edit without a deliberate override. State changes are instantaneous.
 - **`border-radius: 0`** everywhere, via a single `--radius` token.
-- **System fonts only.** No webfont requests; no network requests of any kind
-  at runtime. Numeric cells use `font-variant-numeric: tabular-nums` so values
+- **System fonts only.** No webfont requests. The only runtime network traffic
+  is the Firestore listener and the latest reading's `image_url`. Numeric cells use `font-variant-numeric: tabular-nums` so values
   do not reflow as they update.
-- **Two runtime dependencies:** `react`, `react-dom`. The chart is raw SVG and
+- **Three runtime dependencies:** `react`, `react-dom`, `firebase`. The chart is raw SVG and
   the thermal map is a raw `<canvas>` — no charting or component library.
 
 State is legible without colour: subsystem and block states render as bracketed
@@ -57,10 +59,11 @@ monochrome print and colour-blind operators.
 ```
 src/
   App.jsx                 shell: app bar, tab nav, panel routing
+  firebase.js             Firestore init from .env.local
   useTelemetry.js         the single seam between UI and data source
   lib/format.js           pure formatting helpers, React-free
   data/
-    telemetry.js          reading simulator + hazard rules (no presentation)
+    telemetry.js          Firestore doc -> reading + hazard rules (no presentation)
     schedule.js           five-day plan fixture
     subsystems.js         subsystem roster; each row reads the live document
   components/             AppBar, TabNav, Panel, DataTable, Readout, Meter,
@@ -84,26 +87,21 @@ reconciling them twice a second. The backing store stays at true sensor
 resolution, so no interpolation is invented between pixels. Server-rendered
 markup for the live view dropped from ~41 kB to ~14 kB as a result.
 
-## Wiring to the real backend
+## Data source
 
-`useTelemetry()` is the only module that knows where readings come from.
-`data/telemetry.js` emits documents in exactly the shape
-`pi_sensor_thermal_rover.py` writes to the `readings` collection:
+`src/firebase.js` initialises Firestore from `.env.local`. `useTelemetry()`
+holds an `onSnapshot` listener on
+`query(collection(db,'readings'), orderBy('server_time','desc'), limit(90))`
+and is the only module that knows where readings come from.
+`data/telemetry.js#fromSnapshot` turns each document into the shape the views
+render; any field the document lacks becomes `null` and displays as `—`.
 
-```js
-{ seq, server_time, lat, lon,
-  gas_ppm: { mq2_smoke, mq4_methane, mq7_co, mq135_voc },
-  thermal: { min_c, avg_c, max_c, hotspot_count, hotspot_px },
-  marl_pct, image_url }
-```
+The firmware publishes `thermal.max_c`, `avg_c`, `hotspot_count`, `hotspot_px`
+and the four `gas_ppm` channels; the Pi adds `lat`, `lon`, `image_url` and
+`server_time`. It does not publish `thermal.min_c`, `marl_pct`, the raw
+thermal frame, battery, or link stats, so the console does not show them.
 
-Going live means replacing the `setInterval` in `useTelemetry` with a Firestore
-`onSnapshot` over
-`query(collection(db,'readings'), orderBy('server_time','desc'), limit(1))`
-and pushing each document through the same `setCurrent` / `setHistory` calls.
-Nothing downstream changes.
-
-`thermal.frame` is the one field the simulator adds that the firmware does not
-publish — the raw 768-value array behind the heat map. Against a real backend
-that panel either drops out or requires a new firmware field; `hotspot_px` is
-already published and drives everything else.
+Firestore rejects arrays nested directly in arrays, so the firmware's
+`hotspot_px: [[x, y], ...]` will fail to write once a hotspot is present.
+`fromSnapshot` already accepts `[{x, y}, ...]`, so converting it on the Pi
+before `publish_reading` is enough.

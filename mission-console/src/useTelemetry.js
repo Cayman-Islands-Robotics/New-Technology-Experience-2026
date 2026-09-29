@@ -1,11 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import {
-  TELEMETRY_INTERVAL_MS,
-  WARMUP_MS,
-  hazardLevel,
-  makeReading,
-  seedHistory,
-} from './data/telemetry.js';
+import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
+import { READINGS_COLLECTION, db } from './firebase.js';
+import { fromSnapshot, hazardLevel } from './data/telemetry.js';
 
 const HISTORY_LEN = 90;
 const LOG_LEN = 60;
@@ -14,7 +10,7 @@ let logId = 0;
 
 function logFor(reading, prevLevel) {
   const level = hazardLevel(reading);
-  const t = reading.server_time;
+  const t = reading.server_time ?? Date.now();
   if (level === 'ember' && prevLevel !== 'ember') {
     return { id: ++logId, t, tone: 'alert', text: `HAZARD FLAG · smoke ${reading.gas_ppm.mq2_smoke} ppm + ${reading.thermal.max_c}°C` };
   }
@@ -24,48 +20,69 @@ function logFor(reading, prevLevel) {
   if (level === 'safe' && prevLevel !== 'safe') {
     return { id: ++logId, t, tone: null, text: `cleared · back to baseline` };
   }
-  if (reading.seq % 5 === 0) {
-    return { id: ++logId, t, tone: null, text: `reading logged · seq ${reading.seq}` };
-  }
-  return null;
+  return { id: ++logId, t, tone: null, text: `reading received · seq ${reading.seq}` };
 }
 
 /**
- * Drives the whole console off one simulated telemetry stream.
- * Replacing this with a Firestore onSnapshot listener needs no other changes.
+ * Live view of the newest documents in the Firestore `readings` collection.
+ * `current` is null until the first document arrives.
  */
-export function useTelemetry({ live = true } = {}) {
-  const seed = useRef(null);
-  if (seed.current === null) seed.current = seedHistory(HISTORY_LEN);
-
-  const walker = useRef(seed.current.state);
-  const bootedAt = useRef(Date.now());
+export function useTelemetry() {
   const prevLevel = useRef('safe');
 
-  const [history, setHistory] = useState(seed.current.history);
-  const [current, setCurrent] = useState(() => makeReading(seed.current.state));
+  const [history, setHistory] = useState([]);
+  const [current, setCurrent] = useState(null);
+  const [connection, setConnection] = useState(db ? 'connecting' : 'unconfigured');
   const [log, setLog] = useState(() => [
-    { id: ++logId, t: Date.now(), tone: null, text: 'console attached · replaying mock stream' },
+    db
+      ? { id: ++logId, t: Date.now(), tone: null, text: `connecting · ${READINGS_COLLECTION} collection` }
+      : { id: ++logId, t: Date.now(), tone: 'alert', text: 'no Firebase config · see .env.example' },
   ]);
   const [now, setNow] = useState(() => Date.now());
 
-  // Telemetry tick.
   useEffect(() => {
-    if (!live) return undefined;
-    const id = setInterval(() => {
-      const reading = makeReading(walker.current);
-      setCurrent(reading);
-      setHistory((h) => {
-        const slim = { ...reading, thermal: { ...reading.thermal, frame: undefined } };
-        const next = h.concat(slim);
-        return next.length > HISTORY_LEN ? next.slice(next.length - HISTORY_LEN) : next;
-      });
-      const entry = logFor(reading, prevLevel.current);
-      prevLevel.current = hazardLevel(reading);
-      if (entry) setLog((l) => [entry, ...l].slice(0, LOG_LEN));
-    }, TELEMETRY_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, [live]);
+    if (!db) return undefined;
+    const q = query(
+      collection(db, READINGS_COLLECTION),
+      orderBy('server_time', 'desc'),
+      limit(HISTORY_LEN)
+    );
+    let first = true;
+    return onSnapshot(
+      q,
+      (snap) => {
+        const newestFirst = snap.docs.map(fromSnapshot);
+        setHistory(newestFirst.slice().reverse());
+        setCurrent(newestFirst[0] ?? null);
+        setConnection('live');
+
+        if (first) {
+          first = false;
+          prevLevel.current = hazardLevel(newestFirst[0]);
+          const text = `connected · ${snap.size} reading${snap.size === 1 ? '' : 's'} loaded`;
+          setLog((l) => [{ id: ++logId, t: Date.now(), tone: null, text }, ...l].slice(0, LOG_LEN));
+          return;
+        }
+
+        const added = snap
+          .docChanges()
+          .filter((c) => c.type === 'added')
+          .map((c) => fromSnapshot(c.doc))
+          .reverse(); // oldest first, so hazard transitions log in order
+        const entries = added.map((r) => {
+          const entry = logFor(r, prevLevel.current);
+          prevLevel.current = hazardLevel(r);
+          return entry;
+        });
+        if (entries.length) setLog((l) => [...entries.reverse(), ...l].slice(0, LOG_LEN));
+      },
+      (err) => {
+        console.error(err);
+        setConnection('error');
+        setLog((l) => [{ id: ++logId, t: Date.now(), tone: 'alert', text: `Firestore error · ${err.code ?? err.message}` }, ...l].slice(0, LOG_LEN));
+      }
+    );
+  }, []);
 
   // Wall clock, for the header and the schedule's "now" marker.
   useEffect(() => {
@@ -73,19 +90,12 @@ export function useTelemetry({ live = true } = {}) {
     return () => clearInterval(id);
   }, []);
 
-  const uptimeMs = now - bootedAt.current;
-  const warmupLeftMs = Math.max(0, WARMUP_MS - uptimeMs);
-
   return {
     current,
     history,
     log,
     now,
-    uptimeMs,
-    warmupLeftMs,
-    warmingUp: warmupLeftMs > 0,
+    connection,
     level: hazardLevel(current),
-    // Battery: a plausible slow drain from a full pack at console start.
-    battery: Math.max(6, Math.round(94 - uptimeMs / 60000 * 1.4)),
   };
 }

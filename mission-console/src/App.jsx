@@ -6,6 +6,8 @@ import { ScheduleView } from './views/ScheduleView.jsx';
 import { LiveView } from './views/LiveView.jsx';
 import { useTelemetry } from './useTelemetry.js';
 import { SUBSYSTEMS } from './data/subsystems.js';
+import { Panel } from './components/Panel.jsx';
+import { READINGS_COLLECTION } from './firebase.js';
 import { SCHEDULE, slotStatus } from './data/schedule.js';
 
 const TABS = [
@@ -13,6 +15,21 @@ const TABS = [
   { id: 'schedule', label: 'Schedule' },
   { id: 'live', label: 'Live data' },
 ];
+
+const EMPTY = {
+  connecting: 'Connecting to Firestore…',
+  live: `The ${READINGS_COLLECTION} collection has no documents yet.`,
+  error: 'Could not read from Firestore. Check the browser console and your security rules.',
+  unconfigured: 'No Firebase config. Copy .env.example to .env.local and fill it in.',
+};
+
+function NoReadings({ connection }) {
+  return (
+    <Panel title="No readings" meta={READINGS_COLLECTION}>
+      <p className="note">{EMPTY[connection] ?? EMPTY.connecting}</p>
+    </Panel>
+  );
+}
 
 export default function App() {
   const [tab, setTab] = useState('status');
@@ -34,18 +51,22 @@ export default function App() {
         Skip to content
       </a>
 
-      <AppBar level={t.level} now={t.now} warmingUp={t.warmingUp} />
+      <AppBar level={t.level} now={t.now} connection={t.connection} />
       <TabNav tabs={tabs} active={tab} onChange={setTab} label="Console sections" />
 
       <main id="main" className="panelregion">
         <TabPanel id="status" active={tab === 'status'}>
-          <StatusView {...t} />
+          {t.current ? <StatusView {...t} /> : <NoReadings connection={t.connection} />}
         </TabPanel>
         <TabPanel id="schedule" active={tab === 'schedule'}>
           <ScheduleView now={t.now} />
         </TabPanel>
         <TabPanel id="live" active={tab === 'live'}>
-          <LiveView current={t.current} history={t.history} log={t.log} />
+          {t.current ? (
+            <LiveView current={t.current} history={t.history} log={t.log} />
+          ) : (
+            <NoReadings connection={t.connection} />
+          )}
         </TabPanel>
       </main>
     </div>

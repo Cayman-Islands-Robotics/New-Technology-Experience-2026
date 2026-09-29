@@ -5,7 +5,7 @@ import { DataTable } from '../components/DataTable.jsx';
 import { TrendChart } from '../components/TrendChart.jsx';
 import { ThermalMap } from '../components/ThermalMap.jsx';
 import { HOTSPOT_THRESHOLD_C, hazardLevel } from '../data/telemetry.js';
-import { clockTime, isoAt } from '../lib/format.js';
+import { clockTime, isoAt, latLon, val } from '../lib/format.js';
 
 /* Alarm thresholds, mirrored from the dashboard's hazard rules. */
 const LIMIT = { smoke: 150, co: 50, methane: 40, voc: 450 };
@@ -49,7 +49,7 @@ const FEED_COLUMNS = [
   {
     key: 'pos',
     label: 'Position',
-    render: (r) => `${r.lat.toFixed(4)}, ${r.lon.toFixed(4)}`,
+    render: (r) => latLon(r),
   },
 ];
 
@@ -62,7 +62,7 @@ export function LiveView({ current, history, log }) {
   return (
     <div className="grid grid--live">
       <div className="stack">
-        <Panel title="Live readings" meta={`seq ${current.seq} · ${clockTime(current.server_time)}`}>
+        <Panel title="Live readings" meta={`seq ${val(current.seq)} · ${current.server_time == null ? '—' : clockTime(current.server_time)}`}>
           {/* Values change on a 2 s cadence; announcing every one would be noise,
               so the region is silent and the alarm summary lives in the app bar. */}
           <div className="readout-grid" aria-live="off">
@@ -98,7 +98,7 @@ export function LiveView({ current, history, log }) {
               label="Thermal max"
               value={t.max_c}
               unit="°C"
-              note={`avg ${t.avg_c} · min ${t.min_c}`}
+              note={`avg ${val(t.avg_c)} · min ${val(t.min_c)}`}
               breach={t.max_c > HOTSPOT_THRESHOLD_C}
             />
             <Readout
@@ -110,7 +110,7 @@ export function LiveView({ current, history, log }) {
           </div>
         </Panel>
 
-        <Panel title="Trend" meta="last 60 readings · 2 s cadence">
+        <Panel title="Trend" meta={`last ${Math.min(60, history.length)} of ${history.length} loaded`}>
           <TrendChart
             rows={history.slice(-60)}
             series={SERIES}
@@ -123,17 +123,17 @@ export function LiveView({ current, history, log }) {
             caption="Most recent sensor readings, newest first"
             columns={FEED_COLUMNS}
             rows={feed}
-            rowKey={(r) => r.seq}
+            rowKey={(r) => r.id}
             rowClass={(r) => (hazardLevel(r) === 'ember' ? 'row--marked' : undefined)}
           />
         </Panel>
       </div>
 
       <div className="stack">
-        <Panel title="Thermal frame" meta="MLX90640 · 32 × 24">
+        <Panel title="Thermal hotspots" meta="MLX90640 · 32 × 24">
           <ThermalMap reading={current} />
           <p className="note" style={{ marginTop: 'var(--s2)' }}>
-            {t.hotspot_count
+            {t.hotspot_px.length
               ? `${t.hotspot_count} px above ${HOTSPOT_THRESHOLD_C}°C; first at (${t.hotspot_px[0][0]}, ${t.hotspot_px[0][1]}).`
               : `No pixel above the ${HOTSPOT_THRESHOLD_C}°C hotspot threshold in this frame.`}
           </p>
@@ -141,10 +141,10 @@ export function LiveView({ current, history, log }) {
 
         <Panel title="Marl coverage" meta="colour-threshold v1">
           <p className="readout__value" style={{ marginBottom: 'var(--s2)' }}>
-            {current.marl_pct}
-            <span className="readout__unit">%</span>
+            {val(current.marl_pct)}
+            {current.marl_pct != null && <span className="readout__unit">%</span>}
           </p>
-          <Meter value={current.marl_pct} label="Estimated marl coverage" />
+          {current.marl_pct != null && <Meter value={current.marl_pct} label="Estimated marl coverage" />}
           <p className="note" style={{ marginTop: 'var(--s2)' }}>
             Estimated from the latest capture by an HSV brightness and saturation window. A trained
             classifier replaces this without changing the rest of the pipeline.

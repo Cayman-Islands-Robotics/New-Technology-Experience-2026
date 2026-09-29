@@ -22,3 +22,5 @@ Thumbs.db
 
 # Captures (generated at runtime)
 captures/
+# Vite local env
+*.local

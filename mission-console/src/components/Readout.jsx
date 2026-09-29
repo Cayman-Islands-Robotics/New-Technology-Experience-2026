@@ -7,7 +7,7 @@ export function Readout({ label, value, unit, note, aside, breach = false }) {
         {aside && <span>{aside}</span>}
       </div>
       <div className={breach ? 'readout__value readout__value--breach' : 'readout__value'}>
-        {value}
+        {value ?? '—'}
         {unit && <span className="readout__unit">{unit}</span>}
       </div>
       {note && <div className="readout__note">{note}</div>}

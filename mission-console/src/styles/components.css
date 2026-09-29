@@ -477,3 +477,11 @@
   font-size: var(--fs-2xs);
   color: var(--ink-3);
 }
+
+/* Latest camera still from the reading's image_url. */
+.capture {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--rule-2);
+}

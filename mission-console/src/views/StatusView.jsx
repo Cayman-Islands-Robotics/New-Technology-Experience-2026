@@ -1,11 +1,11 @@
 import { Panel } from '../components/Panel.jsx';
 import { Tag } from '../components/Tag.jsx';
-import { Meter } from '../components/Meter.jsx';
 import { DefList } from '../components/DefList.jsx';
 import { DataTable } from '../components/DataTable.jsx';
 import { STATE_META, SUBSYSTEMS } from '../data/subsystems.js';
-import { HOTSPOT_THRESHOLD_C, WARMUP_MS } from '../data/telemetry.js';
-import { duration } from '../lib/format.js';
+import { HOTSPOT_THRESHOLD_C } from '../data/telemetry.js';
+import { READINGS_COLLECTION, firebaseConfig } from '../firebase.js';
+import { ago, clockTime, latLon, val } from '../lib/format.js';
 
 const SUMMARY = {
   safe: {
@@ -56,18 +56,17 @@ const COLUMNS = [
   },
 ];
 
-export function StatusView({ current, level, uptimeMs, warmupLeftMs, warmingUp, battery }) {
-  const summary = SUMMARY[level] ?? SUMMARY.safe;
-  const rows = SUBSYSTEMS.map((s) => {
-    const r = s.read(current, { battery });
-    // Gas channels report warm-up until the firmware's 180 s soak completes.
-    const state = warmingUp && s.id.startsWith('mq') ? 'warmup' : r.state;
-    return { ...s, ...r, state };
-  });
+const CONNECTION = {
+  connecting: 'connecting',
+  live: 'listening',
+  error: 'error — see event log',
+  unconfigured: 'no config',
+};
 
-  const impaired = rows.filter((r) => r.state === 'degraded' || r.state === 'offline').length;
-  const warmupPct = ((WARMUP_MS - warmupLeftMs) / WARMUP_MS) * 100;
-  const batteryLow = battery < 20;
+export function StatusView({ current, history, level, now, connection }) {
+  const summary = SUMMARY[level] ?? SUMMARY.safe;
+  const rows = SUBSYSTEMS.map((s) => ({ ...s, ...s.read(current) }));
+  const reporting = rows.filter((r) => r.state === 'online').length;
 
   return (
     <div className="stack">
@@ -83,67 +82,56 @@ export function StatusView({ current, level, uptimeMs, warmupLeftMs, warmingUp, 
         </div>
         <dl className="summary__metrics">
           <div className="summary__metric">
-            <dt>Uptime</dt>
-            <dd>{duration(uptimeMs)}</dd>
+            <dt>Last reading</dt>
+            <dd>{ago(current.server_time, now)}</dd>
           </div>
           <div className="summary__metric">
             <dt>Last seq</dt>
-            <dd>{current.seq}</dd>
+            <dd>{val(current.seq)}</dd>
           </div>
           <div className="summary__metric">
-            <dt>Subsystems</dt>
+            <dt>Reporting</dt>
             <dd>
-              {rows.length - impaired}/{rows.length}
+              {reporting}/{rows.length}
             </dd>
           </div>
         </dl>
       </section>
 
       <div className="grid grid--3">
-        <Panel title="Gas sensor warm-up" meta="firmware · 180 s soak">
-          <p className="readout__value" style={{ marginBottom: 'var(--s2)' }}>
-            {warmingUp ? `${Math.ceil(warmupLeftMs / 1000)}s` : 'READY'}
-          </p>
-          <Meter value={warmupPct} label="Gas sensor warm-up progress" />
-          <p className="note" style={{ marginTop: 'var(--s2)' }}>
-            MQ heaters need three minutes at temperature before a reading is meaningful. The sketch
-            withholds telemetry until the soak completes.
-          </p>
-        </Panel>
-
-        <Panel title="Uplink" meta="LTE Cat-4">
-          <p className="readout__value" style={{ marginBottom: 'var(--s2)' }}>
-            184<span className="readout__unit">ms</span>
-          </p>
+        <Panel title="Latest document" meta={current.id}>
           <DefList
             rows={[
-              ['Round trip', 'write ack'],
-              ['Project', 'thermal-rover'],
-              ['Collection', 'readings'],
-              ['Queued writes', '0'],
+              ['Server time', current.server_time == null ? '—' : `${new Date(current.server_time).toLocaleDateString()} ${clockTime(current.server_time)}`],
+              ['Position', latLon(current, 5)],
+              ['Image', current.image_url ? 'attached' : 'none'],
             ]}
           />
         </Panel>
 
-        <Panel title="Power" meta="2 × 5000 mAh · 11.1 V">
-          <p
-            className={batteryLow ? 'readout__value readout__value--breach' : 'readout__value'}
-            style={{ marginBottom: 'var(--s2)' }}
-          >
-            {battery}
-            <span className="readout__unit">%</span>
-          </p>
-          <Meter value={battery} label="Pack charge remaining" alarm={batteryLow} />
-          <p className="note" style={{ marginTop: 'var(--s2)' }}>
-            Approximately {Math.max(0, Math.round(battery * 1.6))} min of drive time at the current
-            draw. Return to Bay 2 below 20%.
-          </p>
+        <Panel title="Source" meta="Firestore">
+          <DefList
+            rows={[
+              ['Project', firebaseConfig.projectId ?? '—'],
+              ['Collection', READINGS_COLLECTION],
+              ['Readings loaded', String(history.length)],
+              ['Listener', CONNECTION[connection] ?? connection],
+            ]}
+          />
+        </Panel>
+
+        <Panel title="Latest capture" meta="image_url">
+          {current.image_url ? (
+            <img className="capture" src={current.image_url} alt={`Camera still attached to reading ${val(current.seq)}`} />
+          ) : (
+            <p className="note">No image attached to the latest reading.</p>
+          )}
         </Panel>
       </div>
 
       <Panel title="Subsystems" meta={`hotspot threshold ${HOTSPOT_THRESHOLD_C}°C`} flush>
         <DataTable
-          caption="Subsystem status, live values and operating state"
+          caption="Subsystem status derived from the latest reading"
           columns={COLUMNS}
           rows={rows}
           rowKey={(r) => r.id}

@@ -124,7 +124,7 @@ struct MQSensor {
   float roKOhm;
   float curveA;
   float curveB;
-  float cleanAirRatio;
+  float cleanAirRatio;s
 };
 
 // Pin mapping per the new PCB: A0 MQ-4, A1 MQ-7, A2 MQ-2, A3 MQ-135

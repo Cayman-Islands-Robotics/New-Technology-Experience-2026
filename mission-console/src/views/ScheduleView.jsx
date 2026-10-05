@@ -37,12 +37,7 @@ const COLUMNS = [
   {
     key: 'title',
     label: 'Block',
-    render: (s) => (
-      <>
-        <strong>{s.title}</strong>
-        <span className="subsys__bus">{s.desc}</span>
-      </>
-    ),
+    render: (s) => <strong>{s.title}</strong>,
   },
   {
     key: 'kind',

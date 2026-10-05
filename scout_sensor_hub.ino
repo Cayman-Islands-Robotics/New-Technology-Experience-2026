@@ -312,6 +312,8 @@ void buildReading(JsonDocument& doc) {
 
 #if USE_THERMAL
   JsonObject thermal = doc["thermal"].to<JsonObject>();
+  thermal["width"] = THERM_W;     // frontends check these against their own 32x24 and log a mismatch
+  thermal["height"] = THERM_H;
   JsonArray hp = thermal["hotspot_px"].to<JsonArray>();
   if (thermalFrameValid) {
     thermal["max_c"] = thermMax;

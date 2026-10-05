@@ -302,9 +302,36 @@ function updateMarlPanel(r) {
 }
 
 // ---------------------------------------------------------------------------
+// Thermal frame dimensions — must match THERMAL_WIDTH / THERMAL_HEIGHT in
+// scout_sensor_hub.ino. A mismatch is only logged to the console; the
+// dashboard keeps running either way.
+// ---------------------------------------------------------------------------
+const THERMAL_WIDTH = 32;
+const THERMAL_HEIGHT = 24;
+
+function checkThermalDimensions(r) {
+  const t = r.thermal;
+  if (!t) return;
+  if (t.width == null || t.height == null) {
+    console.log(`[thermal] seq ${r.seq ?? '–'}: reading has no width/height — expected ${THERMAL_WIDTH}x${THERMAL_HEIGHT}`);
+  } else if (t.width !== THERMAL_WIDTH || t.height !== THERMAL_HEIGHT) {
+    console.log(`[thermal] seq ${r.seq ?? '–'}: got ${t.width}x${t.height}, expected ${THERMAL_WIDTH}x${THERMAL_HEIGHT}`);
+  }
+  if (!Array.isArray(t.hotspot_px)) return;
+  for (const px of t.hotspot_px) {
+    // firmware sends {x, y}; older readings used [x, y]
+    const [x, y] = Array.isArray(px) ? px : [px?.x, px?.y];
+    if (!(x >= 0 && x < THERMAL_WIDTH && y >= 0 && y < THERMAL_HEIGHT)) {
+      console.log(`[thermal] seq ${r.seq ?? '–'}: hotspot pixel (${x}, ${y}) is outside ${THERMAL_WIDTH}x${THERMAL_HEIGHT}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Master handler for each new reading, wherever it comes from
 // ---------------------------------------------------------------------------
 function handleReading(r) {
+  checkThermalDimensions(r);
   plotReading(r);
   updateStats(r);
   pushChartPoint(r);
@@ -360,6 +387,8 @@ function startDemo() {
         mq135_voc: Math.round(100 + Math.random() * 150)
       },
       thermal: {
+        width: THERMAL_WIDTH,
+        height: THERMAL_HEIGHT,
         max_c: Math.round((24 + Math.random() * 10 + (spike ? 15 : 0)) * 10) / 10,
         hotspot_count: spike ? Math.ceil(Math.random() * 3) : 0
       },

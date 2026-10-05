@@ -23,11 +23,28 @@ function hotspotPairs(px) {
     .filter((p) => p && Number.isFinite(p[0]) && Number.isFinite(p[1]));
 }
 
+/**
+ * The firmware publishes its frame size as thermal.width / thermal.height.
+ * A size other than 32x24, or a hotspot outside that field, is only logged —
+ * the reading is still rendered.
+ */
+function checkThermalDimensions(seq, th, px) {
+  if (th.width != null && th.height != null && (th.width !== THERMAL_W || th.height !== THERMAL_H)) {
+    console.log(`[thermal] seq ${seq ?? '–'}: got ${th.width}x${th.height}, expected ${THERMAL_W}x${THERMAL_H}`);
+  }
+  for (const [x, y] of px) {
+    if (x < 0 || x >= THERMAL_W || y < 0 || y >= THERMAL_H) {
+      console.log(`[thermal] seq ${seq ?? '–'}: hotspot pixel (${x}, ${y}) is outside ${THERMAL_W}x${THERMAL_H}`);
+    }
+  }
+}
+
 /** Firestore snapshot -> the plain reading shape the views render. */
 export function fromSnapshot(snap) {
   const d = snap.data({ serverTimestamps: 'estimate' });
   const gas = d.gas_ppm ?? {};
   const th = d.thermal ?? {};
+  checkThermalDimensions(d.seq, th, hotspotPairs(th.hotspot_px));
   return {
     id: snap.id,
     seq: numOrNull(d.seq),

@@ -15,6 +15,9 @@ export const HOTSPOT_THRESHOLD_C = 38;
 
 const numOrNull = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
+/** Temperatures are published to 0.1 °C; this drops float noise such as 25.200001. */
+const tempOrNull = (v) => (numOrNull(v) == null ? null : Math.round(v * 10) / 10);
+
 /** Accepts [[x, y], ...] (firmware) or [{x, y}, ...] (Firestore-safe form). */
 function hotspotPairs(px) {
   if (!Array.isArray(px)) return [];
@@ -39,6 +42,24 @@ function checkThermalDimensions(seq, th, px) {
   }
 }
 
+/**
+ * thermal.pixels is a flat, row-by-row grid of temperatures in °C. The firmware
+ * names its size in thermal.pixels_width / pixels_height (16x16, the sensor
+ * frame averaged down); a 768-value array without them is a full 32x24 frame.
+ * Returns null when there is no grid or its size cannot be told.
+ */
+function thermalGrid(th) {
+  if (!Array.isArray(th.pixels) || th.pixels.length === 0) return null;
+  let width = th.pixels_width;
+  let height = th.pixels_height;
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width * height !== th.pixels.length) {
+    if (th.pixels.length !== THERMAL_W * THERMAL_H) return null;
+    width = THERMAL_W;
+    height = THERMAL_H;
+  }
+  return { width, height, values: th.pixels.map(numOrNull) };
+}
+
 /** Firestore snapshot -> the plain reading shape the views render. */
 export function fromSnapshot(snap) {
   const d = snap.data({ serverTimestamps: 'estimate' });
@@ -58,11 +79,12 @@ export function fromSnapshot(snap) {
       mq135_voc: numOrNull(gas.mq135_voc),
     },
     thermal: {
-      min_c: numOrNull(th.min_c),
-      avg_c: numOrNull(th.avg_c),
-      max_c: numOrNull(th.max_c),
+      min_c: tempOrNull(th.min_c),
+      avg_c: tempOrNull(th.avg_c),
+      max_c: tempOrNull(th.max_c),
       hotspot_count: numOrNull(th.hotspot_count),
       hotspot_px: hotspotPairs(th.hotspot_px),
+      grid: thermalGrid(th),
     },
     marl_pct: numOrNull(d.marl_pct),
     image_url: typeof d.image_url === 'string' ? d.image_url : null,

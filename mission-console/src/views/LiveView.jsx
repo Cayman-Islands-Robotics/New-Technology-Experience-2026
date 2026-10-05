@@ -130,7 +130,10 @@ export function LiveView({ current, history, log }) {
       </div>
 
       <div className="stack">
-        <Panel title="Thermal hotspots" meta="MLX90640 · 32 × 24">
+        <Panel
+          title="Thermal map"
+          meta={`MLX90640 · ${t.grid ? `${t.grid.width} × ${t.grid.height}` : '32 × 24'}`}
+        >
           <ThermalMap reading={current} />
           <p className="note" style={{ marginTop: 'var(--s2)' }}>
             {t.hotspot_px.length

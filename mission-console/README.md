@@ -81,10 +81,14 @@ how to render them.
 
 ### Thermal map
 
-The MLX90640 frame is written into a 32×24 `ImageData` buffer and scaled by CSS
-with `image-rendering: pixelated`, rather than mounting 768 DOM nodes and
-reconciling them twice a second. The backing store stays at true sensor
-resolution, so no interpolation is invented between pixels. Server-rendered
+The firmware's temperature grid (`thermal.pixels`, 16×16 — the 32×24 sensor
+frame averaged down) is coloured yellow → orange → red across that frame's own
+range (at least 5 °C wide, so a uniform room is not stretched into noise),
+written into an `ImageData` buffer at grid resolution and scaled by CSS with
+`image-rendering: pixelated`, rather than mounting hundreds of DOM nodes and
+reconciling them on every reading. No interpolation is invented between cells.
+A reading with no grid falls back to plotting `thermal.hotspot_px` on a blank
+32×24 field. Server-rendered
 markup for the live view dropped from ~41 kB to ~14 kB as a result.
 
 ## Data source
@@ -96,10 +100,11 @@ and is the only module that knows where readings come from.
 `data/telemetry.js#fromSnapshot` turns each document into the shape the views
 render; any field the document lacks becomes `null` and displays as `—`.
 
-The firmware publishes `thermal.max_c`, `avg_c`, `hotspot_count`, `hotspot_px`
+The firmware publishes `thermal.max_c`, `avg_c`, `hotspot_count`, `hotspot_px`,
+the temperature grid `thermal.pixels` (with `pixels_width` / `pixels_height`)
 and the four `gas_ppm` channels; the Pi adds `lat`, `lon`, `image_url` and
-`server_time`. It does not publish `thermal.min_c`, `marl_pct`, the raw
-thermal frame, battery, or link stats, so the console does not show them.
+`server_time`. It does not publish `thermal.min_c`, `marl_pct`, battery, or
+link stats, so the console does not show them.
 
 Firestore rejects arrays nested directly in arrays, so the firmware's
 `hotspot_px: [[x, y], ...]` will fail to write once a hotspot is present.

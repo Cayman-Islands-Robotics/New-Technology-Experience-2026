@@ -210,7 +210,7 @@ export function ScheduleView({ now }) {
           rows={slots}
           rowKey={(s) => `${s.start}-${s.title}`}
           rowClass={(s) =>
-            s.status === 'active' ? 'row--marked' : s.status === 'done' ? 'row--done' : undefined
+            s.status === 'active' ? 'row--current' : s.status === 'done' ? 'row--done' : undefined
           }
         />
       </Panel>

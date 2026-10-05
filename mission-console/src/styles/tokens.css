@@ -31,6 +31,9 @@
   --accent:      #cc2200;
   --accent-weak: #ffecea;  /* flattened tint, not a gradient */
 
+  /* --- schedule: the block in progress right now ------------------------ */
+  --current:     #1a7f37;
+
   /* --- type -------------------------------------------------------------
      Period-correct system stacks. No webfonts, no network requests. */
   --font-ui: "Lucida Grande", "Lucida Sans Unicode", Geneva, Verdana, Tahoma,

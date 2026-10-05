@@ -193,6 +193,7 @@
 .table td:first-child,
 .table th:first-child { border-left: 3px solid transparent; }
 .table tr.row--marked td:first-child { border-left-color: var(--accent); }
+.table tr.row--current td:first-child { border-left-color: var(--current); }
 .table tr.row--done td { color: var(--ink-3); }
 
 /* --- summary bar ----------------------------------------------------------- */
@@ -322,9 +323,9 @@
   border-right: 1px solid var(--paper);
 }
 .gantt__block--done { background: var(--ink-3); }
-.gantt__block--marked { background: var(--accent); }
+.gantt__block--marked { background: var(--current); }
 
-/* Current time. Stays legible on top of an accent-filled active block via a
+/* Current time. Stays legible on top of the green active block via a
    1px paper outline, and overhangs the track at both ends. */
 .gantt__now {
   position: absolute;
